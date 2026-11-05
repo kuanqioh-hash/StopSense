@@ -54,7 +54,7 @@ npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite, usually <http://127.0.0.1:5173>. The Vite development server proxies `/api/*` requests to the FastAPI server at `127.0.0.1:8000`, so no separate CORS configuration is needed for local development. The React page receives telemetry over a live event stream and has three views: passenger app, bus-stop screen, and operations dashboard. Use the header's Dark mode / Light mode control to switch themes across the dashboard; the choice is saved in this browser and initially follows the operating-system preference when no saved choice exists.
+Open the local URL printed by Vite, usually <http://127.0.0.1:5173>. The Vite development server proxies `/api/*` requests to the FastAPI server at `127.0.0.1:8000`, so no separate CORS configuration is needed for local development. The React page receives telemetry over a live event stream and has three views: passenger app, bus-stop screen, and operations dashboard. It opens with buttons for three sample profiles (passenger, stop attendant, and operations manager); each profile can access only its assigned passenger, bus-stop screen, or operations view, and the session is saved in the current browser. This is demo-only client-side view restriction, not authentication: the API has no authentication and remains accessible independently of the selected profile. Use the header's Dark mode / Light mode control to switch themes across the dashboard; the choice is saved in this browser and initially follows the operating-system preference when no saved choice exists.
 
 If FastAPI or the simulator is unavailable, the frontend shows clearly labelled preview values; it does not mistake these for real sensor data.
 
@@ -67,7 +67,30 @@ npm run build
 npm run preview
 ```
 
-The development proxy only applies to `npm run dev`. Production builds read `VITE_API_URL` from `frontend/.env.production`, currently set to `https://CoolStop.onrender.com`; changing it requires rebuilding and redeploying the static site. The FastAPI app allows browser requests from `https://qiphy.github.io` for its read-only API endpoints. Deploy the updated backend as well as the frontend so the CORS configuration takes effect.
+The development proxy only applies to `npm run dev`. Production builds read `VITE_API_URL` from `frontend/.env.production`, currently set to `https://CoolStop.onrender.com`; changing it requires rebuilding and redeploying the static site. The FastAPI app allows browser requests from `https://qiphy.github.io` and the Capacitor Android/iOS origins; this is CORS configuration, not authentication. Deploy the updated backend as well as the frontend so the CORS configuration takes effect.
+
+### Android and iOS apps
+
+The React frontend can also be packaged as native Android and iOS apps with Capacitor. The generated Android and Xcode projects are in `frontend/android` and `frontend/ios`; the app bundles the built frontend and connects to the hosted API configured in `frontend/.env.production`.
+
+From `frontend/`, install dependencies and sync the web build into the native projects:
+
+```bash
+npm install
+npm run mobile:sync
+```
+
+For a locally installable Android debug APK, install Android Studio and the Android SDK, then run:
+
+```bash
+npm run android:debug
+```
+
+The APK is written to `frontend/android/app/build/outputs/apk/debug/app-debug.apk`. For a Play Store or distributable release, open Android Studio with `npm run android:open` and use **Build > Generate Signed Bundle / APK** with your own release signing key.
+
+For iOS, use a Mac with Xcode. Open the synced project with `npm run ios:open`, select your Apple development team and signing settings, then use Xcode's **Product > Archive** workflow to export an IPA. A valid Apple signing identity and provisioning profile are required to install or distribute an iPhone build; those are not included in this repository.
+
+Camera use is declared in both native projects. Validate camera permission prompts, the TensorFlow.js person detector, and the live API connection on real devices. Capacitor's Android and iOS origins are allowed by the local FastAPI CORS configuration; deploy that backend change before testing against the hosted API. The backend currently has no authentication and is a demonstration service, so do not publish it for public use without adding authentication and other production safeguards.
 
 ### Solar generation and reference energy use
 
@@ -84,6 +107,25 @@ The frontend opens a Server-Sent Events connection to `GET /events/telemetry`. T
 ETAs are generated in the frontend from example route headways, not live bus GPS. They are labelled simulated in all views. Passenger view includes a hands-free two-ad carousel that slides between time-based sample nearby-shop offers every 15 seconds, expandable shop details, sample walk/bus/alight directions, locally generated QR codes for demo voucher and route links, a location-permission prompt, sample disruption alternatives, and a comparison of fictional e-hailing providers. The non-touchscreen stop display rotates two sample ad slides automatically every 15 seconds, sliding horizontally to reveal the next ad and then returning to the first. Each slide keeps its ad creative, route or promo details, and QR code visible without requiring interaction; the separate journey-alternatives QR was removed to keep this area uncluttered. QR scans reopen the demo app and display a prototype notice; voucher redemption, map navigation and live service data are not integrated. No user location is stored or sent to the API; location access is only requested after the user presses the button. The demo does not use coordinates for routing: even after permission is granted, the sample alternatives are still based on the selected stop until an approved map/transit routing source is integrated.
 
 The disruption control is a local simulation, not a real disruption feed. Alternative bus routes, fare estimates, pickup ETAs and vehicle types are fictional examples. Selecting “continue” does not place an order or contact a provider. Public transport alternatives are shown first; real multi-provider quotes and booking require transit/map feeds and each e-hailing company’s agreement and API integration. Shop names/offers are also fictional and do not imply a partnership. For real arrivals, connect an authorized transit API or GTFS-Realtime feed and report its source and update time. Crowd level means people waiting at the stop, **not occupancy onboard a bus**.
+
+## Arduino Uno + SHT31 over USB
+
+For an Arduino Uno connected to the computer by USB, a small Python bridge forwards SHT31 readings to FastAPI. The Uno has no Wi-Fi; keep the computer and API reachable while the bridge runs.
+
+**Wire the SHT31 breakout with power disconnected:** connect SDA to Uno A4, SCL to A5, GND to GND, and VIN/VCC to the voltage supported by your breakout board. Many breakout boards accept 3.3–5 V, but check its documentation; use a logic-level shifter if the board is 3.3 V-only and not 5 V tolerant. The default I2C address in the sketch is `0x44`.
+
+In Arduino IDE, select **Arduino Uno** and its USB port, install **Adafruit SHT31 Library** (including its prompted dependencies), then open `arduino/UnoSHT31/UnoSHT31.ino` and upload it. The sketch emits `SHT31,<temperature C>,<relative humidity %>` records at 115200 baud every five seconds. If the sensor is not found, check wiring and I2C address; the sketch reports an error and retries.
+
+Install the serial bridge dependency and start FastAPI as described above. In another terminal from the project root, set the Arduino's serial port and run:
+
+```bash
+python -m pip install -r requirements-arduino.txt
+python arduino_serial_bridge.py --port /dev/cu.usbmodem1101 --api-url http://127.0.0.1:8000/telemetry --device-id stop-01
+```
+
+Replace the example port with the Uno's port shown in Arduino IDE (**Tools > Port**); macOS ports commonly begin `/dev/cu.usbmodem`, Windows ports look like `COM3`, and Linux ports commonly look like `/dev/ttyACM0`. The bridge also accepts `SERIAL_PORT`, `TELEMETRY_URL`, and `DEVICE_ID` environment variables. Close Arduino IDE's Serial Monitor before running the bridge because only one process can use the serial port at a time. Stop it with Ctrl+C.
+
+For a hosted API, pass its full telemetry endpoint using `--api-url`, for example `https://your-api.example/telemetry`. The API must be reachable from the computer running the bridge, and the frontend must point at that same backend to display its readings. This demo API has no authentication; do not expose it publicly without adding authentication and deployment safeguards. The bridge sends temperature and humidity; water level, power, and cooler state are stored as `null` and shown as not reported, rather than fabricated.
 
 ## Shared ESP32/FastAPI payload
 

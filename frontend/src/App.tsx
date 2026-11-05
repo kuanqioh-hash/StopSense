@@ -9,9 +9,9 @@ type Reading = {
   timestamp: string
   temperature_c: number
   humidity_pct: number
-  water_level_pct: number
-  power_w: number
-  cooler_on: boolean
+  water_level_pct: number | null
+  power_w: number | null
+  cooler_on: boolean | null
   crowd_level: CrowdLevel
   crowd_source: string
   fault_code: string | null
@@ -28,8 +28,34 @@ type PassengerCount = {
 }
 type View = 'passenger' | 'screen' | 'operations'
 type Route = { route: string; destination: string; headway: number; offset: number }
+type SampleAccount = { id: string; name: string; initials: string; role: string; description: string; defaultView: View }
 
 const API = import.meta.env.VITE_API_URL || '/api'
+const DEMO_ACCOUNT_STORAGE_KEY = 'CoolStop-demo-account'
+const sampleAccounts: SampleAccount[] = [
+  { id: 'aisha-rahman', name: 'Aisha Rahman', initials: 'AR', role: 'Passenger', description: 'Check arrivals and waiting conditions.', defaultView: 'passenger' },
+  { id: 'daniel-lim', name: 'Daniel Lim', initials: 'DL', role: 'Stop attendant', description: 'See the public bus-stop display.', defaultView: 'screen' },
+  { id: 'mei-chen', name: 'Mei Chen', initials: 'MC', role: 'Operations manager', description: 'Monitor shelter and fleet operations.', defaultView: 'operations' },
+]
+const viewLabels: Record<View, string> = {
+  passenger: 'Passenger app',
+  screen: 'Bus-stop screen',
+  operations: 'Operations',
+}
+const viewIcons: Record<View, string> = {
+  passenger: '⌕',
+  screen: '▣',
+  operations: '⌘',
+}
+
+function getSavedSampleAccount(): SampleAccount | null {
+  try {
+    const savedId = localStorage.getItem(DEMO_ACCOUNT_STORAGE_KEY)
+    return sampleAccounts.find((account) => account.id === savedId) ?? null
+  } catch {
+    return null
+  }
+}
 const routes: Route[] = [
   { route: 'T1', destination: 'Town Centre', headway: 8, offset: 17 },
   { route: 'T2', destination: 'MRT Station', headway: 12, offset: 103 },
@@ -78,11 +104,12 @@ function latestPerStop(readings: Reading[]) {
 }
 
 function App() {
+  const [activeAccount, setActiveAccount] = useState<SampleAccount | null>(getSavedSampleAccount)
   const [readings, setReadings] = useState<Reading[]>([])
   const [passengerCounts, setPassengerCounts] = useState<PassengerCount[]>([])
   const [selectedStop, setSelectedStop] = useState('')
   const [selectedBusRoute, setSelectedBusRoute] = useState(routes[0].route)
-  const [view, setView] = useState<View>('passenger')
+  const view = activeAccount?.defaultView ?? 'passenger'
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
       const savedTheme = localStorage.getItem('CoolStop-theme')
@@ -109,6 +136,15 @@ function App() {
   }, [theme])
 
   useEffect(() => {
+    try {
+      if (activeAccount) localStorage.setItem(DEMO_ACCOUNT_STORAGE_KEY, activeAccount.id)
+      else localStorage.removeItem(DEMO_ACCOUNT_STORAGE_KEY)
+    } catch {
+      // Sample sign-in still works for this session when browser storage is unavailable.
+    }
+  }, [activeAccount])
+
+  useEffect(() => {
     const readAppLink = () => {
       const match = window.location.hash.match(/^#(voucher|route|alternatives)=(.*)$/)
       if (!match) {
@@ -127,6 +163,10 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!activeAccount) return
+    setLoading(true)
+    setError('')
+    setStreamConnected(false)
     let active = true
     let receivedSnapshot = false
     const stream = new EventSource(`${API}/events/telemetry`)
@@ -167,7 +207,7 @@ function App() {
       stream.close()
       window.clearInterval(clock)
     }
-  }, [])
+  }, [activeAccount])
 
   const latest = useMemo(() => latestPerStop(readings), [readings])
   useEffect(() => {
@@ -181,6 +221,10 @@ function App() {
   const routeOfferId = appLinkNotice?.kind === 'route' ? appLinkNotice.value.split('|').pop() ?? '' : ''
   const routeOffer = routeOfferId ? getOfferLinkDetails(routeOfferId) : null
 
+  if (!activeAccount) {
+    return <AuthScreen onSignIn={setActiveAccount} theme={theme} onToggleTheme={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} />
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -191,7 +235,8 @@ function App() {
         <div className="topbar-right">
           <span className={`connection ${error ? 'connection-offline' : ''}`}><i />{error ? 'Preview mode' : 'Demo system'}</span>
           <button type="button" className="theme-toggle" onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'}><span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span><span>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span></button>
-          <button className="avatar" aria-label="Demo profile">DS</button>
+          <div className="account-badge"><span className="avatar" aria-hidden="true">{activeAccount.initials}</span><span className="account-details"><strong>{activeAccount.name}</strong><small>{activeAccount.role}</small></span></div>
+          <button type="button" className="sign-out-button" onClick={() => setActiveAccount(null)}>Sign out</button>
         </div>
       </header>
 
@@ -211,11 +256,9 @@ function App() {
         </div>
         {appLinkNotice && <div className="app-link-notice" role="status"><span><strong>{appLinkNotice.kind === 'voucher' ? `Sample voucher ${appLinkNotice.value}` : appLinkNotice.kind === 'route' && routeOffer ? `Directions to ${routeOffer.shop}` : appLinkNotice.kind === 'route' ? 'Sample shop directions opened' : `Sample journey alternatives from ${appLinkNotice.value}`}</strong><small>{appLinkNotice.kind === 'voucher' ? 'This demo code is not redeemable; a real voucher needs a participating shop integration.' : appLinkNotice.kind === 'route' && routeOffer ? `${routeOffer.walk} · ${routeOffer.route} · alight ${routeOffer.alight}. Sample only; live maps are not connected.` : 'This QR opens a prototype link. Live maps, transit routes and service disruption data are not connected.'}</small></span><button type="button" onClick={() => { window.location.hash = 'home'; setAppLinkNotice(null) }}>Dismiss</button></div>}
 
-        <nav className="view-switcher" aria-label="Choose dashboard view">
-          <button className={view === 'passenger' ? 'active' : ''} onClick={() => setView('passenger')}><span>⌕</span> Passenger app</button>
-          <button className={view === 'screen' ? 'active' : ''} onClick={() => setView('screen')}><span>▣</span> Bus-stop screen</button>
-          <button className={view === 'operations' ? 'active' : ''} onClick={() => setView('operations')}><span>⌘</span> Operations</button>
-        </nav>
+        <div className="view-switcher" role="group" aria-label="Your available view">
+          <span className="active"><span aria-hidden="true">{viewIcons[view]}</span> {viewLabels[view]}</span>
+        </div>
 
         {loading && latest.length === 0 ? <div className="loading-card">Connecting to the stop telemetry service…</div> : !reading ? <div className="loading-card">No stop data is available.</div> : (
           <>
@@ -233,6 +276,37 @@ function App() {
         )}
 
         <footer className="footer"><span>CoolStop · Bus stop cooling and transit information prototype</span><span>Crowd level is waiting-area estimate, not onboard occupancy.</span></footer>
+      </main>
+    </div>
+  )
+}
+
+function AuthScreen({ onSignIn, theme, onToggleTheme }: { onSignIn: (account: SampleAccount) => void; theme: 'light' | 'dark'; onToggleTheme: () => void }) {
+  return (
+    <div className="app-shell auth-shell">
+      <header className="topbar auth-topbar">
+        <a className="brand" href="#home" aria-label="CoolStop home">
+          <span className="brand-mark">C</span>
+          <span>CoolStop<span className="brand-dot">.</span><small>Township transit, made better</small></span>
+        </a>
+        <button type="button" className="theme-toggle" onClick={onToggleTheme} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-pressed={theme === 'dark'}><span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span><span>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span></button>
+      </header>
+      <main className="auth-main">
+        <section className="auth-card" aria-labelledby="auth-title">
+          <div className="auth-eyebrow">WELCOME TO COOLSTOP</div>
+          <h1 id="auth-title">Choose a sample account</h1>
+          <p className="auth-intro">Sign in as a different user to explore the experience for each role.</p>
+          <div className="sample-account-list">
+            {sampleAccounts.map((account) => (
+              <button type="button" className="sample-account-button" key={account.id} onClick={() => onSignIn(account)}>
+                <span className="sample-account-avatar" aria-hidden="true">{account.initials}</span>
+                <span className="sample-account-copy"><strong>{account.name}</strong><small>{account.role} · {account.description}</small></span>
+                <span className="sample-account-arrow" aria-hidden="true">→</span>
+              </button>
+            ))}
+          </div>
+          <p className="auth-disclaimer"><strong>Demo sign-in only.</strong> These sample profiles are stored in this browser and do not authenticate with the server. The API has no authentication.</p>
+        </section>
       </main>
     </div>
   )
@@ -257,7 +331,7 @@ function PassengerView({ reading, arrivals, buses, selectedBusRoute, onBusChange
           <Condition icon="≈" label="Humidity" value={`${Math.round(reading.humidity_pct)}`} unit="%" tone="blue" detail="Relative humidity" />
           <Condition icon="♙" label="Waiting crowd" value={reading.crowd_level} unit="" tone="green" detail="People at this stop" />
         </div>
-        <div className="comfort-tip"><span>✦</span><span><strong>Cooling system {reading.cooler_on ? 'is running' : 'is on standby'}</strong><small>Comfort data last updated {formatTimestamp(reading.timestamp)}</small></span></div>
+        <div className="comfort-tip"><span>✦</span><span><strong>{reading.cooler_on === null ? 'Cooling system status unavailable' : `Cooling system ${reading.cooler_on ? 'is running' : 'is on standby'}`}</strong><small>Comfort data last updated {formatTimestamp(reading.timestamp)}</small></span></div>
       </article>
       <article className="bus-crowd-card">
         <div className="bus-crowd-heading"><div><span className="card-kicker">DOORWAY-BASED ONBOARD ESTIMATE</span><strong>{buses.find((bus) => bus.route === selectedBusRoute)?.destination ?? 'Selected bus'}</strong></div><label>Bus<select aria-label="Select bus for onboard estimate" value={selectedBusRoute} onChange={(event) => onBusChange(event.target.value)}>{buses.map((bus) => <option key={bus.route} value={bus.route}>{bus.route} · {bus.destination}</option>)}</select></label></div>
@@ -352,20 +426,20 @@ function StopScreen({ reading, arrivals }: { reading: Reading; arrivals: ReturnT
 
 function OperationsView({ readings, reading, arrivals }: { readings: Reading[]; reading: Reading; arrivals: ReturnType<typeof getArrivals> }) {
   const fault = reading.fault_code
-  const state = fault ? 'Needs attention' : reading.cooler_on ? 'Cooling active' : 'Standby'
+  const state = fault ? 'Needs attention' : reading.cooler_on === null ? 'Partial telemetry' : reading.cooler_on ? 'Cooling active' : 'Standby'
   return (
     <section className="operations-view">
       <div className="operations-heading"><div><span className="card-kicker">FLEET MONITOR</span><h2>Stop operations</h2></div><span className={`state-badge ${fault ? 'fault' : ''}`}><i />{state}</span></div>
       <div className="ops-grid">
         <OpsMetric label="Air temperature" value={`${reading.temperature_c.toFixed(1)} °C`} icon="☀" note="Shelter sensor" />
         <OpsMetric label="Relative humidity" value={`${reading.humidity_pct.toFixed(1)}%`} icon="≈" note="Shelter sensor" />
-        <OpsMetric label="Water remaining" value={`${reading.water_level_pct.toFixed(0)}%`} icon="♧" note={reading.water_level_pct < 20 ? 'Refill required' : 'Tank level'} alert={reading.water_level_pct < 20} />
-        <OpsMetric label="Power draw" value={`${reading.power_w.toFixed(1)} W`} icon="ϟ" note="Cooling equipment" />
+        <OpsMetric label="Water remaining" value={reading.water_level_pct === null ? 'Not reported' : `${reading.water_level_pct.toFixed(0)}%`} icon="♧" note={reading.water_level_pct !== null && reading.water_level_pct < 20 ? 'Refill required' : reading.water_level_pct === null ? 'No water sensor' : 'Tank level'} alert={reading.water_level_pct !== null && reading.water_level_pct < 20} />
+        <OpsMetric label="Power draw" value={reading.power_w === null ? 'Not reported' : `${reading.power_w.toFixed(1)} W`} icon="ϟ" note={reading.power_w === null ? 'No power sensor' : 'Cooling equipment'} />
       </div>
       {fault && <div className="fault-banner"><strong>Fault reported: {fault}</strong><span>Inspect the device and confirm water and sensor status.</span></div>}
       <div className="ops-lower-grid">
         <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">SERVICE ESTIMATE</span><h3>Upcoming arrivals</h3></div><span className="simulated-tag">SIMULATED</span></div>{arrivals.slice(0, 3).map((bus) => <div className="service-row" key={`${bus.route}-${bus.eta}`}><span className="route-chip small">{bus.route}</span><span className="service-destination">{bus.destination}</span><strong>{formatEta(bus.eta)}</strong></div>)}<p className="panel-footnote">Headway-based demo values. Connect an authorized transit feed for live ETAs.</p></article>
-        <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">DEVICE HEALTH</span><h3>{reading.device_id}</h3></div><span className="device-dot"><i /> Online</span></div><div className="health-row"><span>Waiting-area crowd</span><strong>{reading.crowd_level}</strong></div><div className="health-row"><span>Crowd data source</span><strong>{reading.crowd_source}</strong></div><div className="health-row"><span>Last sensor update</span><strong>{formatTimestamp(reading.timestamp)}</strong></div><div className="health-row"><span>Cooler state</span><strong>{reading.cooler_on ? 'On' : 'Off'}</strong></div></article>
+        <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">DEVICE HEALTH</span><h3>{reading.device_id}</h3></div><span className="device-dot"><i /> Online</span></div><div className="health-row"><span>Waiting-area crowd</span><strong>{reading.crowd_level}</strong></div><div className="health-row"><span>Crowd data source</span><strong>{reading.crowd_source}</strong></div><div className="health-row"><span>Last sensor update</span><strong>{formatTimestamp(reading.timestamp)}</strong></div><div className="health-row"><span>Cooler state</span><strong>{reading.cooler_on === null ? 'Not reported' : reading.cooler_on ? 'On' : 'Off'}</strong></div></article>
       </div>
       <div className="site-summary"><div><strong>{readings.length}</strong><span>stops reporting</span></div><div><strong>{readings.filter((item) => item.cooler_on).length}</strong><span>coolers running</span></div><div><strong>{readings.filter((item) => Boolean(item.fault_code)).length}</strong><span>faults reported</span></div><small>Live server-pushed telemetry · Demonstration values only</small></div>
     </section>

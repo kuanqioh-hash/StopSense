@@ -127,6 +127,56 @@ class PassengerCountApiTests(unittest.TestCase):
         self.assertEqual(stored["crowd_source"], "unknown")
         self.assertNotIn("boarding_count", stored)
 
+    def test_sht31_only_telemetry_stores_unmeasured_fields_as_null(self):
+        reading = main.Reading(
+            device_id="arduino-sht31-01",
+            timestamp=datetime.fromisoformat("2026-10-21T00:00:00+00:00"),
+            temperature_c=25.4,
+            humidity_pct=61.2,
+            crowd_source="sensor",
+        )
+        main.receive_telemetry(reading)
+        stored = main.list_telemetry(limit=200, device_id="arduino-sht31-01")["items"][0]
+        self.assertEqual(stored["temperature_c"], 25.4)
+        self.assertEqual(stored["humidity_pct"], 61.2)
+        self.assertIsNone(stored["water_level_pct"])
+        self.assertIsNone(stored["power_w"])
+        self.assertIsNone(stored["cooler_on"])
+
+    def test_telemetry_migration_preserves_existing_readings_and_index(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("DROP TABLE telemetry")
+            connection.execute(
+                """CREATE TABLE telemetry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    temperature_c REAL NOT NULL,
+                    humidity_pct REAL NOT NULL,
+                    water_level_pct REAL NOT NULL,
+                    power_w REAL NOT NULL,
+                    cooler_on INTEGER NOT NULL,
+                    crowd_level TEXT NOT NULL DEFAULT 'Unknown',
+                    crowd_source TEXT NOT NULL DEFAULT 'unknown',
+                    fault_code TEXT
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO telemetry (
+                    device_id, timestamp, temperature_c, humidity_pct,
+                    water_level_pct, power_w, cooler_on, crowd_level, crowd_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("legacy-stop", "2026-10-21T00:00:00+00:00", 31.2, 72, 85, 14.6, 1, "Low", "manual"),
+            )
+        main.initialize_db()
+        stored = main.list_telemetry(limit=200, device_id="legacy-stop")["items"][0]
+        self.assertEqual(stored["temperature_c"], 31.2)
+        self.assertEqual(stored["water_level_pct"], 85)
+        self.assertEqual(stored["cooler_on"], True)
+        with sqlite3.connect(self.db_path) as connection:
+            indexes = {row[1] for row in connection.execute("PRAGMA index_list(telemetry)")}
+        self.assertIn("idx_telemetry_device_time", indexes)
+
 
 class LineCrossingTests(unittest.TestCase):
     def test_occupancy_increments_and_decrements_on_each_boundary_crossing(self):

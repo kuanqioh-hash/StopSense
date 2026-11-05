@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CoolStop</string>
+    <string name="title_activity_main">CoolStop</string>
+    <string name="package_name">com.qiphy.stopsense</string>
+    <string name="custom_url_scheme">com.qiphy.stopsense</string>
+</resources>

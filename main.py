@@ -18,7 +18,11 @@ DB_PATH = Path(os.environ.get("TELEMETRY_DB", "telemetry.db"))
 app = FastAPI(title="Bus Stop Telemetry Demo", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://qiphy.github.io"],
+    allow_origins=[
+        "https://qiphy.github.io",
+        "https://localhost",
+        "capacitor://localhost",
+    ],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -52,9 +56,9 @@ class Reading(BaseModel):
     timestamp: datetime
     temperature_c: float = Field(ge=-20, le=70)
     humidity_pct: float = Field(ge=0, le=100)
-    water_level_pct: float = Field(ge=0, le=100)
-    power_w: float = Field(ge=0, le=5000)
-    cooler_on: bool
+    water_level_pct: float | None = Field(default=None, ge=0, le=100)
+    power_w: float | None = Field(default=None, ge=0, le=5000)
+    cooler_on: bool | None = None
     crowd_level: Literal["Low", "Moderate", "High", "Unknown"] = "Unknown"
     crowd_source: Literal["simulated", "manual", "sensor", "operator", "unknown"] = "unknown"
     fault_code: str | None = Field(default=None, max_length=64)
@@ -106,6 +110,40 @@ def initialize_db() -> None:
             connection.execute(
                 "ALTER TABLE telemetry ADD COLUMN crowd_source TEXT NOT NULL DEFAULT 'unknown'"
             )
+
+        column_nullability = {
+            row["name"]: row["notnull"]
+            for row in connection.execute("PRAGMA table_info(telemetry)")
+        }
+        optional_fields = ("water_level_pct", "power_w", "cooler_on")
+        if any(column_nullability.get(field, 0) for field in optional_fields):
+            connection.execute("DROP INDEX IF EXISTS idx_telemetry_device_time")
+            connection.execute("ALTER TABLE telemetry RENAME TO telemetry_legacy")
+            connection.execute(
+                """CREATE TABLE telemetry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    temperature_c REAL NOT NULL,
+                    humidity_pct REAL NOT NULL,
+                    water_level_pct REAL,
+                    power_w REAL,
+                    cooler_on INTEGER,
+                    crowd_level TEXT NOT NULL DEFAULT 'Unknown',
+                    crowd_source TEXT NOT NULL DEFAULT 'unknown',
+                    fault_code TEXT
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO telemetry (
+                    id, device_id, timestamp, temperature_c, humidity_pct,
+                    water_level_pct, power_w, cooler_on, crowd_level, crowd_source, fault_code
+                ) SELECT
+                    id, device_id, timestamp, temperature_c, humidity_pct,
+                    water_level_pct, power_w, cooler_on, crowd_level, crowd_source, fault_code
+                FROM telemetry_legacy"""
+            )
+            connection.execute("DROP TABLE telemetry_legacy")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_telemetry_device_time "
             "ON telemetry(device_id, timestamp DESC)"
@@ -161,7 +199,7 @@ def receive_telemetry(reading: Reading) -> dict[str, object]:
                 payload["humidity_pct"],
                 payload["water_level_pct"],
                 payload["power_w"],
-                int(payload["cooler_on"]),
+                None if payload["cooler_on"] is None else int(payload["cooler_on"]),
                 payload["crowd_level"],
                 payload["crowd_source"],
                 payload["fault_code"],
@@ -194,7 +232,8 @@ def list_telemetry(
         rows = connection.execute(sql, params).fetchall()
     items = [dict(row) for row in rows]
     for item in items:
-        item["cooler_on"] = bool(item["cooler_on"])
+        if item["cooler_on"] is not None:
+            item["cooler_on"] = bool(item["cooler_on"])
     return {"items": items}
 
 

@@ -2,13 +2,17 @@ import argparse
 import json
 import math
 import os
+import ssl
 import time
 from datetime import datetime, timezone
+
+import certifi
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 DEFAULT_API_URL = os.environ.get("TELEMETRY_URL", "http://127.0.0.1:8000/telemetry")
 DEFAULT_DEVICE_ID = os.environ.get("DEVICE_ID", "arduino-sht31-01")
+TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 def parse_reading(line: str, device_id: str = DEFAULT_DEVICE_ID) -> dict[str, object] | None:
@@ -52,7 +56,7 @@ def post_reading(api_url: str, payload: dict[str, object]) -> None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=5, context=TLS_CONTEXT) as response:
         print(f"Saved {payload['temperature_c']} °C, {payload['humidity_pct']}% RH: HTTP {response.status}")
 
 

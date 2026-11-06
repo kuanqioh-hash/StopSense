@@ -2,6 +2,7 @@ import asyncio
 import csv
 import io
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -14,6 +15,8 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import requests
+from google.protobuf.message import DecodeError
+from google.transit import gtfs_realtime_pb2
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,13 +28,19 @@ GTFS_STATIC_URL = os.environ.get(
     "GTFS_STATIC_URL",
     "https://api.data.gov.my/gtfs-static/prasarana?category=rapid-bus-kl",
 )
+GTFS_REALTIME_URL = os.environ.get(
+    "GTFS_REALTIME_URL",
+    "https://api.data.gov.my/gtfs-realtime/vehicle-position/prasarana?category=rapid-bus-kl",
+)
 GTFS_CACHE_SECONDS = 24 * 60 * 60
+GTFS_REALTIME_CACHE_SECONDS = 25
 GTFS_TIMEZONE = ZoneInfo("Asia/Kuala_Lumpur")
 GTFS_STATIONS = {
     "usj7": {
-        "name": "USJ 7 (BRT & LRT)",
-        "stops": ("1005834", "1006526"),
+        "name": "USJ 7 · SJ693 LRT USJ 7",
+        "stops": ("1006526",),
     },
+
     "subang-jaya": {
         "name": "LRT Subang Jaya",
         "stops": ("1006524",),
@@ -43,6 +52,8 @@ GTFS_STATIONS = {
 }
 _gtfs_cache: dict[str, object] = {"expires_at": 0.0, "data": None}
 _gtfs_cache_lock = threading.Lock()
+_gtfs_realtime_cache: dict[str, object] = {"expires_at": 0.0, "data": None}
+_gtfs_realtime_cache_lock = threading.Lock()
 
 app = FastAPI(title="Bus Stop Telemetry Demo", version="0.1.0")
 app.add_middleware(
@@ -264,7 +275,9 @@ def _download_gtfs() -> dict[str, object]:
                 stop_ids = {
                     stop_id for station in GTFS_STATIONS.values() for stop_id in station["stops"]
                 }
+                live_stop_ids = set(GTFS_STATIONS["usj7"]["stops"])
                 departures = []
+                live_trip_ids: set[str] = set()
                 for row in read_csv("stop_times.txt"):
                     if row["stop_id"] not in stop_ids:
                         continue
@@ -272,14 +285,36 @@ def _download_gtfs() -> dict[str, object]:
                     route = routes.get(trip["route_id"]) if trip else None
                     if trip is None or route is None:
                         continue
+                    if row["stop_id"] in live_stop_ids:
+                        live_trip_ids.add(row["trip_id"])
+                    stop = stops.get(row["stop_id"], {})
                     departures.append({
                         "stop_id": row["stop_id"],
-                        "stop_name": stops.get(row["stop_id"], {}).get("stop_name", ""),
+                        "stop_name": stop.get("stop_name", ""),
+                        "stop_lat": stop.get("stop_lat", ""),
+                        "stop_lon": stop.get("stop_lon", ""),
                         "route": route.get("route_short_name", ""),
+                        "route_id": trip["route_id"],
+                        "trip_id": row["trip_id"],
+                        "shape_id": trip.get("shape_id", ""),
+                        "sequence": int(row.get("stop_sequence") or 0),
                         "destination": trip.get("trip_headsign") or route.get("route_long_name", ""),
                         "service_id": trip["service_id"],
                         "departure_time": row.get("departure_time") or row["arrival_time"],
                     })
+                shapes: dict[str, list[dict[str, float]]] = {}
+                live_shape_ids = {trips[trip_id].get("shape_id", "") for trip_id in live_trip_ids}
+                if "shapes.txt" in archive_files:
+                    for row in read_csv("shapes.txt"):
+                        shape_id = row.get("shape_id", "")
+                        if shape_id in live_shape_ids and shape_id:
+                            shapes.setdefault(shape_id, []).append({
+                                "lat": float(row["shape_pt_lat"]),
+                                "lon": float(row["shape_pt_lon"]),
+                                "sequence": int(row.get("shape_pt_sequence") or 0),
+                            })
+                    for points in shapes.values():
+                        points.sort(key=lambda point: point["sequence"])
                 feed: dict[str, object] = {
                     "stations": [
                         {
@@ -293,6 +328,7 @@ def _download_gtfs() -> dict[str, object]:
                     "calendar": calendar_rows,
                     "calendar_dates": calendar_date_rows,
                     "departures": departures,
+                    "shapes": shapes,
                     "fetched_at": datetime.now(timezone.utc).isoformat(),
                 }
         except (requests.RequestException, zipfile.BadZipFile, KeyError, csv.Error) as exc:
@@ -309,6 +345,152 @@ def transit_stops() -> dict[str, object]:
     return {"stations": feed["stations"], "source": "RapidKL GTFS Static", "fetched_at": feed["fetched_at"]}
 
 
+def _download_gtfs_realtime() -> list[dict[str, object]]:
+    with _gtfs_realtime_cache_lock:
+        cached = _gtfs_realtime_cache["data"]
+        if cached is not None and float(_gtfs_realtime_cache["expires_at"]) > time.monotonic():
+            return cached  # type: ignore[return-value]
+        try:
+            response = requests.get(GTFS_REALTIME_URL, timeout=20)
+            response.raise_for_status()
+            feed = gtfs_realtime_pb2.FeedMessage()
+            feed.ParseFromString(response.content)
+            if not feed.IsInitialized():
+                raise ValueError("Incomplete GTFS-Realtime feed")
+            vehicles = []
+            for entity in feed.entity:
+                if not entity.HasField("vehicle") or not entity.vehicle.HasField("position"):
+                    continue
+                vehicle = entity.vehicle
+                if not vehicle.HasField("trip") or not vehicle.trip.trip_id:
+                    continue
+                vehicles.append({
+                    "id": vehicle.vehicle.id if vehicle.HasField("vehicle") else entity.id,
+                    "trip_id": vehicle.trip.trip_id,
+                    "route_id": vehicle.trip.route_id,
+                    "lat": vehicle.position.latitude,
+                    "lon": vehicle.position.longitude,
+                    "bearing": vehicle.position.bearing if vehicle.position.HasField("bearing") else None,
+                    "speed": vehicle.position.speed if vehicle.position.HasField("speed") else None,
+                    "timestamp": vehicle.timestamp if vehicle.HasField("timestamp") else feed.header.timestamp,
+                })
+        except (requests.RequestException, DecodeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="RapidKL live vehicle positions are temporarily unavailable") from exc
+        _gtfs_realtime_cache["data"] = vehicles
+        _gtfs_realtime_cache["expires_at"] = time.monotonic() + GTFS_REALTIME_CACHE_SECONDS
+        return vehicles
+
+
+def _distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    lat_delta = math.radians(lat2 - lat1)
+    lon_delta = math.radians(lon2 - lon1)
+    mean_lat = math.radians((lat1 + lat2) / 2)
+    return 6_371_000 * math.hypot(lat_delta, lon_delta * math.cos(mean_lat))
+
+
+def _nearest_shape_point(lat: float, lon: float, points: list[dict[str, float]]) -> tuple[int, float]:
+    nearest = min(
+        range(len(points)),
+        key=lambda index: _distance_meters(lat, lon, points[index]["lat"], points[index]["lon"]),
+    )
+    return nearest, _distance_meters(lat, lon, points[nearest]["lat"], points[nearest]["lon"])
+
+
+def _distance_along_shape(points: list[dict[str, float]], start: int, end: int) -> float:
+    return sum(
+        _distance_meters(points[index]["lat"], points[index]["lon"], points[index + 1]["lat"], points[index + 1]["lon"])
+        for index in range(start, end)
+    )
+
+
+def _live_usj7_departures(feed: dict[str, object], now: datetime) -> list[dict[str, object]]:
+    station_stop_ids = set(GTFS_STATIONS["usj7"]["stops"])
+    stop_departures = [item for item in feed["departures"] if item["stop_id"] in station_stop_ids]
+    trips = {item["trip_id"]: item for item in stop_departures}
+    by_trip = {}
+    for item in stop_departures:
+        by_trip.setdefault(item["trip_id"], []).append(item)
+    shapes = feed["shapes"]
+    live_vehicles = _download_gtfs_realtime()
+    active_services_by_date = {
+        service_date: _active_services(feed["calendar"], service_date, feed["calendar_dates"])
+        for service_date in (now.date() - timedelta(days=1), now.date())
+    }
+    results = []
+    seen_vehicles = set()
+    for vehicle in live_vehicles:
+        trip_id = vehicle["trip_id"]
+        occurrences = by_trip.get(trip_id)
+        if not occurrences:
+            continue
+        trip = trips[trip_id]
+        if vehicle["route_id"] and vehicle["route_id"] != trip["route_id"]:
+            continue
+        shape = shapes.get(trip["shape_id"])
+        if not shape or len(shape) < 2:
+            continue
+        timestamp = datetime.fromtimestamp(float(vehicle["timestamp"]), timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        if age_seconds < -30 or age_seconds > 120:
+            continue
+        position_index, off_route = _nearest_shape_point(float(vehicle["lat"]), float(vehicle["lon"]), shape)
+        if off_route > 400:
+            continue
+        speed = float(vehicle["speed"] or 0)
+        if speed > 0 and not 2 <= speed <= 20:
+            continue
+        speed = speed if speed > 0 else 5.0
+        for occurrence in occurrences:
+            shape_stop_index, stop_offset = _nearest_shape_point(
+                float(occurrence["stop_lat"]), float(occurrence["stop_lon"]), shape
+            )
+            if stop_offset > 400 or position_index >= shape_stop_index:
+                continue
+            if vehicle["bearing"] is not None:
+                current = shape[position_index]
+                following = shape[min(position_index + 1, len(shape) - 1)]
+                segment_bearing = (math.degrees(math.atan2(
+                    math.sin(math.radians(following["lon"] - current["lon"])) * math.cos(math.radians(following["lat"])),
+                    math.cos(math.radians(current["lat"])) * math.sin(math.radians(following["lat"])) - math.sin(math.radians(current["lat"])) * math.cos(math.radians(following["lat"])) * math.cos(math.radians(following["lon"] - current["lon"])),
+                )) + 360) % 360
+                bearing_delta = abs((float(vehicle["bearing"]) - segment_bearing + 180) % 360 - 180)
+                if bearing_delta > 120:
+                    continue
+            remaining_meters = _distance_along_shape(shape, position_index, shape_stop_index) + stop_offset
+            if remaining_meters > 20_000:
+                continue
+            eta_seconds = max(0, int(remaining_meters / speed))
+            estimated_at = now + timedelta(seconds=eta_seconds)
+            schedule_candidates = [
+                _parse_gtfs_time(occurrence["departure_time"], service_date)
+                for service_date in active_services_by_date
+                if occurrence["service_id"] in active_services_by_date[service_date]
+            ]
+            schedule_candidates = [
+                scheduled for scheduled in schedule_candidates
+                if abs((scheduled - now).total_seconds()) <= 6 * 60 * 60
+            ]
+            if not schedule_candidates:
+                continue
+            scheduled_at = min(schedule_candidates, key=lambda scheduled: abs((scheduled - now).total_seconds()))
+            vehicle_id = str(vehicle["id"])
+            if vehicle_id in seen_vehicles:
+                continue
+            seen_vehicles.add(vehicle_id)
+            results.append({
+                "route": occurrence["route"],
+                "destination": occurrence["destination"],
+                "stop_name": occurrence["stop_name"],
+                "arrival_at": estimated_at.isoformat(),
+                "scheduled_time": estimated_at.strftime("%H:%M"),
+                "minutes_until": int((eta_seconds + 59) / 60),
+                "vehicle_id": vehicle_id,
+                "position_updated_at": timestamp.isoformat(),
+            })
+    results.sort(key=lambda item: item["arrival_at"])
+    return results[:6]
+
+
 @app.get("/transit/departures")
 def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> dict[str, object]:
     if station_id not in GTFS_STATIONS:
@@ -316,6 +498,19 @@ def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> 
 
     feed = _download_gtfs()
     now = datetime.now(GTFS_TIMEZONE)
+    station = next(item for item in feed["stations"] if item["id"] == station_id)
+    if station_id == "usj7":
+        return {
+            "station": station,
+            "stop_ids": station["stop_ids"],
+            "departures": _live_usj7_departures(feed, now),
+            "source": "RapidKL GTFS-Realtime vehicle positions (estimated)",
+            "realtime": True,
+            "estimate": True,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "checked_at": now.isoformat(),
+        }
+
     calendar_rows = feed["calendar"]
     calendar_date_rows = feed["calendar_dates"]
     departures = feed["departures"]
@@ -341,13 +536,13 @@ def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> 
                     "minutes_until": max(0, int((scheduled - now).total_seconds() / 60 + 0.999)),
                 })
     results.sort(key=lambda item: item["scheduled_at"])
-    station = next(item for item in feed["stations"] if item["id"] == station_id)
     return {
         "station": station,
         "stop_ids": station["stop_ids"],
         "departures": results[:6],
         "source": "RapidKL GTFS Static",
         "realtime": False,
+        "estimate": False,
         "fetched_at": feed["fetched_at"],
         "checked_at": now.isoformat(),
     }

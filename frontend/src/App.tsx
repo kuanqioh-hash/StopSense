@@ -29,7 +29,7 @@ type PassengerCount = {
 type View = 'passenger' | 'screen' | 'operations'
 type Route = { route: string; destination: string }
 type TransitStationOption = { id: string; name: string }
-type TransitDeparture = { route: string; destination: string; stop_name: string; scheduled_at: string; scheduled_time: string; minutes_until: number }
+type TransitDeparture = { route: string; destination: string; stop_name: string; scheduled_at?: string; arrival_at?: string; scheduled_time: string; minutes_until: number; vehicle_id?: string }
 type TransitStation = { id: string; name: string; stop_ids: string[]; stops: { stop_id: string; stop_name: string; stop_lat: string; stop_lon: string }[] }
 type SampleAccount = { id: string; name: string; initials: string; role: string; description: string; defaultView: View }
 
@@ -51,7 +51,7 @@ const viewIcons: Record<View, string> = {
   operations: '⌘',
 }
 const rapidKlStations: TransitStationOption[] = [
-  { id: 'usj7', name: 'USJ 7 (BRT & LRT)' },
+  { id: 'usj7', name: 'USJ 7 · SJ693 LRT USJ 7' },
   { id: 'subang-jaya', name: 'LRT Subang Jaya' },
   { id: 'putra-heights', name: 'LRT Putra Heights' },
 ]
@@ -81,6 +81,10 @@ const previewReadings: Reading[] = [
 function formatEta(seconds: number) {
   if (seconds < 60) return '<1min'
   return `${Math.ceil(seconds / 60)} min`
+}
+
+function transitTimestamp(departure: TransitDeparture) {
+  return departure.arrival_at ?? departure.scheduled_at ?? ''
 }
 
 function formatTimestamp(timestamp: string) {
@@ -217,9 +221,9 @@ function App() {
     const loadDepartures = async () => {
       try {
         const response = await fetch(`${API}/transit/departures?station_id=${encodeURIComponent(selectedStationId)}`)
-        if (!response.ok) throw new Error(`RapidKL schedule request failed (${response.status})`)
-        const data = await response.json() as { station: TransitStation; departures: TransitDeparture[]; fetched_at: string }
-        if (!Array.isArray(data.departures) || !data.station) throw new Error('Unexpected RapidKL schedule response')
+        if (!response.ok) throw new Error(`RapidKL transit request failed (${response.status})`)
+        const data = await response.json() as { station: TransitStation; departures: TransitDeparture[]; fetched_at: string; realtime?: boolean }
+        if (!Array.isArray(data.departures) || !data.station) throw new Error('Unexpected RapidKL transit response')
         if (active) {
           setTransitStation(data.station)
           setTransitFetchedAt(data.fetched_at)
@@ -237,7 +241,7 @@ function App() {
     }
     setTransitLoading(true)
     loadDepartures()
-    const refresh = window.setInterval(loadDepartures, 60_000)
+    const refresh = window.setInterval(loadDepartures, selectedStationId === 'usj7' ? 30_000 : 60_000)
     return () => {
       active = false
       window.clearInterval(refresh)
@@ -287,7 +291,7 @@ function App() {
 
         <div className={`demo-notice ${usingPreview ? 'preview-notice' : ''}`}>
           <span className="notice-icon">{usingPreview ? '◷' : 'i'}</span>
-          <span><strong>{usingPreview ? 'PREVIEW DATA' : 'DEMO MODE'}</strong> — stop readings are {usingPreview ? 'example values shown because the API has no data' : 'simulated by the software device simulator'}. RapidKL departures use scheduled GTFS data and are not live arrival predictions.{error && <small className="notice-error">API connection: {error}. Start FastAPI and simulator.py to load readings.</small>}</span>
+          <span><strong>{usingPreview ? 'PREVIEW DATA' : 'DEMO MODE'}</strong> — stop readings are {usingPreview ? 'example values shown because the API has no data' : 'simulated by the software device simulator'}. USJ 7 arrivals are estimated from live vehicle positions; other station times use the published timetable.{error && <small className="notice-error">API connection: {error}. Start FastAPI and simulator.py to load readings.</small>}</span>
         </div>
         {appLinkNotice && <div className="app-link-notice" role="status"><span><strong>{appLinkNotice.kind === 'voucher' ? `Sample voucher ${appLinkNotice.value}` : appLinkNotice.kind === 'route' && routeOffer ? `Directions to ${routeOffer.shop}` : appLinkNotice.kind === 'route' ? 'Sample shop directions opened' : `Sample journey alternatives from ${appLinkNotice.value}`}</strong><small>{appLinkNotice.kind === 'voucher' ? 'This demo code is not redeemable; a real voucher needs a participating shop integration.' : appLinkNotice.kind === 'route' && routeOffer ? `${routeOffer.walk} · ${routeOffer.route} · alight ${routeOffer.alight}. Sample only; live maps are not connected.` : 'This QR opens a prototype link. Live maps, transit routes and service disruption data are not connected.'}</small></span><button type="button" onClick={() => { window.location.hash = 'home'; setAppLinkNotice(null) }}>Dismiss</button></div>}
 
@@ -303,13 +307,13 @@ function App() {
             </div>
 
             <div className="stop-toolbar transit-toolbar">
-              <div className="stop-label"><span className="pin">⌖</span><span><strong>RAPIDKL BUS SCHEDULE</strong><small>{transitLoading ? 'Loading GTFS schedule…' : `GTFS static · Feed refreshed ${formatTimestamp(transitFetchedAt)}`}</small></span></div>
+              <div className="stop-label"><span className="pin">⌖</span><span><strong>{selectedStationId === 'usj7' ? 'LIVE-POSITION ARRIVAL ESTIMATES' : 'RAPIDKL BUS SCHEDULE'}</strong><small>{transitLoading ? 'Loading RapidKL transit data…' : selectedStationId === 'usj7' ? `Vehicle positions · checked ${formatTimestamp(transitFetchedAt)}` : `GTFS static · Feed refreshed ${formatTimestamp(transitFetchedAt)}`}</small></span></div>
               <label className="select-wrap"><span className="sr-only">Select RapidKL station</span><select value={selectedStationId} onChange={(event) => { setTransitDepartures([]); setTransitStation(null); setTransitLoading(true); setSelectedStationId(event.target.value) }}>{rapidKlStations.map((station) => <option key={station.id} value={station.id}>{station.name}</option>)}</select><span className="select-chevron">⌄</span></label>
             </div>
-            {transitError && <div className="notice-error" role="status">RapidKL schedule unavailable: {transitError}. Check that the backend can reach the official GTFS feed.</div>}
-            {view === 'passenger' && <PassengerView reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} error={transitError} now={now} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} report={passengerCounts.filter((report) => report.bus_route === selectedBusRoute).sort((a, b) => b.observed_at.localeCompare(a.observed_at))[0]} />}
-            {view === 'screen' && <StopScreen reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} />}
-            {view === 'operations' && <OperationsView readings={latest} reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} />}
+            {transitError && <div className="notice-error" role="status">RapidKL transit data unavailable: {transitError}. Check that the backend can reach the official feed.</div>}
+            {view === 'passenger' && <PassengerView reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} error={transitError} now={now} estimated={selectedStationId === 'usj7'} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} report={passengerCounts.filter((report) => report.bus_route === selectedBusRoute).sort((a, b) => b.observed_at.localeCompare(a.observed_at))[0]} />}
+            {view === 'screen' && <StopScreen reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} estimated={selectedStationId === 'usj7'} />}
+            {view === 'operations' && <OperationsView readings={latest} reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} estimated={selectedStationId === 'usj7'} />}
             {view !== 'screen' && <SolarGeneration />}
             {view === 'operations' && <PassengerFlow reports={passengerCounts} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} />}
           </>
@@ -352,19 +356,19 @@ function AuthScreen({ onSignIn, theme, onToggleTheme }: { onSignIn: (account: Sa
   )
 }
 
-function PassengerView({ reading, departures, stationName, loading, error, now, buses, selectedBusRoute, onBusChange, report }: { reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; error: string; now: number; buses: Route[]; selectedBusRoute: string; onBusChange: (route: string) => void; report?: PassengerCount }) {
+function PassengerView({ reading, departures, stationName, loading, error, now, estimated, buses, selectedBusRoute, onBusChange, report }: { reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; error: string; now: number; estimated: boolean; buses: Route[]; selectedBusRoute: string; onBusChange: (route: string) => void; report?: PassengerCount }) {
   const nextBus = departures[0]
-  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(departure.scheduled_at).getTime() - now) / 60000))
+  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(transitTimestamp(departure)).getTime() - now) / 60000))
   return (
     <section className="passenger-grid">
       <article className="arrival-card">
-        <div className="card-topline"><span className="card-kicker">{stationName} · SCHEDULE</span><span className="simulated-tag">RAPIDKL GTFS</span></div>
+        <div className="card-topline"><span className="card-kicker">{stationName} · {estimated ? 'LIVE ESTIMATE' : 'SCHEDULE'}</span><span className="simulated-tag">{estimated ? 'GPS-BASED' : 'RAPIDKL GTFS'}</span></div>
         {nextBus ? <>
           <div className="arrival-main"><div><span className="route-chip">{nextBus.route}</span><span className="destination">{nextBus.destination}</span></div><strong>{formatEta(minutesUntil(nextBus) * 60)}</strong></div>
           <div className="arrival-progress"><span style={{ width: `${Math.max(8, 100 - minutesUntil(nextBus) / 60 * 100)}%` }} /></div>
-          <div className="arrival-foot"><span>{nextBus.stop_name}</span><span>Scheduled {nextBus.scheduled_time}</span></div>
-          <div className="upcoming-list">{departures.slice(1, 3).map((bus) => <div className="upcoming-row" key={`${bus.route}-${bus.scheduled_at}`}><span><b>{bus.route}</b> · {bus.destination} <small>{bus.stop_name}</small></span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>)}</div>
-        </> : <div className="bus-crowd-reading bus-crowd-inactive"><strong>{loading ? 'Loading schedule…' : error ? 'Schedule unavailable' : 'No more scheduled departures'}</strong><span>Scheduled times are provided from RapidKL static GTFS data, not live bus positions.</span></div>}
+          <div className="arrival-foot"><span>{nextBus.stop_name}</span><span>{estimated ? `Estimated ${nextBus.scheduled_time}` : `Scheduled ${nextBus.scheduled_time}`}</span></div>
+          <div className="upcoming-list">{departures.slice(1, 3).map((bus) => <div className="upcoming-row" key={`${bus.route}-${bus.arrival_at ?? bus.scheduled_at}`}><span><b>{bus.route}</b> · {bus.destination} <small>{bus.stop_name}</small></span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>)}</div>
+        </> : <div className="bus-crowd-reading bus-crowd-inactive"><strong>{loading ? 'Loading transit data…' : error ? 'Transit data unavailable' : estimated ? 'No live vehicles approaching' : 'No more scheduled departures'}</strong><span>{estimated ? 'GPS-based estimates appear only when a fresh vehicle is matched to SJ693.' : 'Scheduled times use RapidKL static GTFS timetable data.'}</span></div>}
       </article>
 
       <article className="comfort-card">
@@ -429,22 +433,22 @@ function PassengerFlow({ reports, buses, selectedBusRoute, onBusChange }: { repo
   )
 }
 
-function StopScreen({ reading, departures, stationName, loading, now }: { reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number }) {
-  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(departure.scheduled_at).getTime() - now) / 60000))
+function StopScreen({ reading, departures, stationName, loading, now, estimated }: { reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number; estimated: boolean }) {
+  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(transitTimestamp(departure)).getTime() - now) / 60000))
   return (
     <section className="screen-wrap">
       <div className="screen-device">
         <div className="screen-header"><span className="screen-logo">C</span><span>CoolStop <small>SMART BUS STOP</small></span><span className="screen-clock">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div>
         <div className="screen-content-grid">
           <section className="screen-arrivals-panel" aria-label="Upcoming bus arrivals">
-            <div className="screen-next-label">{stationName} · SCHEDULE <span className="simulated-tag">RAPIDKL GTFS</span></div>
+            <div className="screen-next-label">{stationName} · {estimated ? 'LIVE ESTIMATE' : 'SCHEDULE'} <span className="simulated-tag">{estimated ? 'GPS-BASED' : 'RAPIDKL GTFS'}</span></div>
             <div className="screen-arrivals">
               {departures.length > 0 ? departures.map((bus) => (
-                <article className="screen-arrival-card" key={`${bus.route}-${bus.scheduled_at}`}>
+                <article className="screen-arrival-card" key={`${bus.route}-${bus.arrival_at ?? bus.scheduled_at}`}>
                   <div className="screen-arrival-card-top"><span className="screen-route small">{bus.route}</span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>
-                  <span className="screen-arrival-destination">{bus.destination} · {bus.scheduled_time}</span>
+                  <span className="screen-arrival-destination">{bus.destination} · {estimated ? 'Estimated' : 'Scheduled'} {bus.scheduled_time}</span>
                 </article>
-              )) : <p>{loading ? 'Loading RapidKL schedule…' : 'No scheduled departures available.'}</p>}
+              )) : <p>{loading ? 'Loading RapidKL transit data…' : estimated ? 'No live vehicles approaching SJ693.' : 'No scheduled departures available.'}</p>}
             </div>
           </section>
         </div>
@@ -461,16 +465,16 @@ function StopScreen({ reading, departures, stationName, loading, now }: { readin
         </section>
         <div className="screen-info"><span><i className="screen-sun">☀</i> {reading.temperature_c.toFixed(1)}°C <small>Temperature</small></span><span><i className="screen-humidity">≈</i> {Math.round(reading.humidity_pct)}% <small>Humidity</small></span><span><i className="screen-crowd">♙</i> {reading.crowd_level} <small>Waiting crowd</small></span></div>
         <ScreenSampleAd stopId={reading.device_id} />
-        <div className="screen-footer">Scheduled departures from RapidKL GTFS · Not live arrival predictions · Scan an ad QR to continue on your phone</div>
+        <div className="screen-footer">{estimated ? 'GPS-based arrival estimates · Not official predictions' : 'Scheduled departures from RapidKL GTFS · Actual arrivals may differ'} · Scan an ad QR to continue on your phone</div>
       </div>
-      <div className="screen-notes"><span className="screen-note-icon">▣</span><div><strong>Designed for a quick glance</strong><p>Scheduled departures are sourced from RapidKL static GTFS; actual bus arrival times may differ.</p></div></div>
+      <div className="screen-notes"><span className="screen-note-icon">▣</span><div><strong>Designed for a quick glance</strong><p>{estimated ? 'USJ 7 estimates use live vehicle positions and route geometry; they are not official trip predictions.' : 'Scheduled departures are sourced from RapidKL static GTFS; actual bus arrival times may differ.'}</p></div></div>
     </section>
   )
 }
 
-function OperationsView({ readings, reading, departures, stationName, loading, now }: { readings: Reading[]; reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number }) {
+function OperationsView({ readings, reading, departures, stationName, loading, now, estimated }: { readings: Reading[]; reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number; estimated: boolean }) {
   const fault = reading.fault_code
-  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(departure.scheduled_at).getTime() - now) / 60000))
+  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(transitTimestamp(departure)).getTime() - now) / 60000))
   const state = fault ? 'Needs attention' : reading.cooler_on === null ? 'Partial telemetry' : reading.cooler_on ? 'Cooling active' : 'Standby'
   return (
     <section className="operations-view">
@@ -483,7 +487,7 @@ function OperationsView({ readings, reading, departures, stationName, loading, n
       </div>
       {fault && <div className="fault-banner"><strong>Fault reported: {fault}</strong><span>Inspect the device and confirm water and sensor status.</span></div>}
       <div className="ops-lower-grid">
-        <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">RAPIDKL GTFS STATIC</span><h3>{stationName} departures</h3></div><span className="simulated-tag">SCHEDULED</span></div>{departures.length > 0 ? departures.slice(0, 3).map((bus) => <div className="service-row" key={`${bus.route}-${bus.scheduled_at}`}><span className="route-chip small">{bus.route}</span><span className="service-destination">{bus.destination}</span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>) : <p>{loading ? 'Loading schedule…' : 'No scheduled departures available.'}</p>}<p className="panel-footnote">These are timetable departures, not realtime predictions; actual bus arrivals may differ.</p></article>
+        <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">{estimated ? 'RAPIDKL LIVE POSITIONS' : 'RAPIDKL GTFS STATIC'}</span><h3>{stationName} {estimated ? 'arrival estimates' : 'departures'}</h3></div><span className="simulated-tag">{estimated ? 'ESTIMATED' : 'SCHEDULED'}</span></div>{departures.length > 0 ? departures.slice(0, 3).map((bus) => <div className="service-row" key={`${bus.route}-${bus.arrival_at ?? bus.scheduled_at}`}><span className="route-chip small">{bus.route}</span><span className="service-destination">{bus.destination}</span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>) : <p>{loading ? 'Loading transit data…' : estimated ? 'No live vehicles approaching SJ693.' : 'No scheduled departures available.'}</p>}<p className="panel-footnote">{estimated ? 'GPS-based estimates from vehicle positions; not official trip predictions.' : 'These are timetable departures, not realtime predictions; actual bus arrivals may differ.'}</p></article>
         <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">DEVICE HEALTH</span><h3>{reading.device_id}</h3></div><span className="device-dot"><i /> Online</span></div><div className="health-row"><span>Waiting-area crowd</span><strong>{reading.crowd_level}</strong></div><div className="health-row"><span>Crowd data source</span><strong>{reading.crowd_source}</strong></div><div className="health-row"><span>Last sensor update</span><strong>{formatTimestamp(reading.timestamp)}</strong></div><div className="health-row"><span>Cooler state</span><strong>{reading.cooler_on === null ? 'Not reported' : reading.cooler_on ? 'On' : 'Off'}</strong></div></article>
       </div>
       <div className="site-summary"><div><strong>{readings.length}</strong><span>stops reporting</span></div><div><strong>{readings.filter((item) => item.cooler_on).length}</strong><span>coolers running</span></div><div><strong>{readings.filter((item) => Boolean(item.fault_code)).length}</strong><span>faults reported</span></div><small>Live server-pushed telemetry · Demonstration values only</small></div>

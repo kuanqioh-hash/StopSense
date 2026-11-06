@@ -53,14 +53,19 @@ class RapidKlGtfsTests(unittest.TestCase):
                 {"route_id": "U7700", "route_short_name": "770", "route_long_name": "Subang Mewah USJ 1 ~ Hab Pasar Seni"},
             ],
             "trips.txt": [
-                {"route_id": "B1000", "service_id": "daily", "trip_id": "trip1", "trip_headsign": "SETIA JAYA"},
-                {"route_id": "U7700", "service_id": "daily", "trip_id": "trip2", "trip_headsign": "HAB PASAR SENI"},
+                {"route_id": "B1000", "service_id": "daily", "trip_id": "trip1", "trip_headsign": "SETIA JAYA", "shape_id": "shape1"},
+                {"route_id": "U7700", "service_id": "daily", "trip_id": "trip2", "trip_headsign": "HAB PASAR SENI", "shape_id": "shape2"},
             ],
             "calendar.txt": [self.calendar],
             "stop_times.txt": [
                 {"trip_id": "trip1", "stop_id": "1005834", "arrival_time": self._gtfs_time(soon_minutes), "departure_time": self._gtfs_time(soon_minutes)},
                 {"trip_id": "trip2", "stop_id": "1006526", "arrival_time": self._gtfs_time(later_minutes), "departure_time": self._gtfs_time(later_minutes)},
                 {"trip_id": "trip1", "stop_id": "1006524", "arrival_time": self._gtfs_time(soon_minutes), "departure_time": self._gtfs_time(soon_minutes)},
+            ],
+            "shapes.txt": [
+                {"shape_id": "shape2", "shape_pt_lat": "3.04", "shape_pt_lon": "101.59", "shape_pt_sequence": "1"},
+                {"shape_id": "shape2", "shape_pt_lat": "3.05", "shape_pt_lon": "101.59", "shape_pt_sequence": "2"},
+                {"shape_id": "shape2", "shape_pt_lat": "3.06", "shape_pt_lon": "101.59", "shape_pt_sequence": "3"},
             ],
         }
         output = io.BytesIO()
@@ -82,19 +87,81 @@ class RapidKlGtfsTests(unittest.TestCase):
         self.assertEqual(get.call_count, 1)
         self.assertEqual(stops["source"], "RapidKL GTFS Static")
         self.assertEqual([station["id"] for station in stops["stations"]], ["usj7", "subang-jaya", "putra-heights"])
-        self.assertEqual(stops["stations"][0]["stops"][0]["stop_name"], "STESEN BRT USJ7")
+        self.assertEqual(stops["stations"][0]["stop_ids"], ["1006526"])
+        self.assertEqual(stops["stations"][0]["stops"][0]["stop_name"], "SJ693 LRT USJ 7")
         self.assertEqual(second["fetched_at"], stops["fetched_at"])
 
-    def test_departures_are_scheduled_and_scoped_to_selected_station(self):
+    def test_scheduled_departures_remain_for_other_stations(self):
         response = Mock(content=self.zip_bytes)
         response.raise_for_status.return_value = None
         with patch.object(main.requests, "get", return_value=response):
-            result = main.transit_departures("usj7")
+            result = main.transit_departures("subang-jaya")
         self.assertFalse(result["realtime"])
         self.assertEqual(result["source"], "RapidKL GTFS Static")
-        self.assertEqual(len(result["departures"]), 2)
-        self.assertEqual([item["route"] for item in result["departures"]], ["SUNWAY LINE", "770"])
-        self.assertTrue(all(item["minutes_until"] > 0 for item in result["departures"]))
+        self.assertEqual(len(result["departures"]), 1)
+        self.assertEqual(result["departures"][0]["route"], "SUNWAY LINE")
+        self.assertTrue(result["departures"][0]["minutes_until"] > 0)
+
+    def _vehicle_feed(self, *, latitude=3.04, timestamp=None):
+        message = main.gtfs_realtime_pb2.FeedMessage()
+        message.header.gtfs_realtime_version = "2.0"
+        message.header.timestamp = int((timestamp or datetime.now(main.GTFS_TIMEZONE)).timestamp())
+        entity = message.entity.add()
+        entity.id = "vehicle-1"
+        entity.vehicle.trip.trip_id = "trip2"
+        entity.vehicle.trip.route_id = "U7700"
+        entity.vehicle.vehicle.id = "vehicle-1"
+        entity.vehicle.position.latitude = latitude
+        entity.vehicle.position.longitude = 101.59
+        entity.vehicle.position.bearing = 0
+        entity.vehicle.position.speed = 5
+        entity.vehicle.timestamp = message.header.timestamp
+        return message.SerializeToString()
+
+    def test_usj7_uses_fresh_live_vehicle_and_only_sj693(self):
+        static_response = Mock(content=self.zip_bytes)
+        static_response.raise_for_status.return_value = None
+        live_response = Mock(content=self._vehicle_feed())
+        live_response.raise_for_status.return_value = None
+        cache_patch = patch.object(main, "_gtfs_realtime_cache", {"expires_at": 0.0, "data": None})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
+        with patch.object(main.requests, "get", side_effect=[static_response, live_response]):
+            result = main.transit_departures("usj7")
+        self.assertTrue(result["realtime"])
+        self.assertTrue(result["estimate"])
+        self.assertEqual(result["stop_ids"], ["1006526"])
+        self.assertEqual(len(result["departures"]), 1)
+        self.assertEqual(result["departures"][0]["route"], "770")
+        self.assertIn("arrival_at", result["departures"][0])
+        self.assertNotIn("scheduled_at", result["departures"][0])
+        self.assertGreater(result["departures"][0]["minutes_until"], 0)
+
+    def test_usj7_ignores_stale_vehicle_positions(self):
+        static_response = Mock(content=self.zip_bytes)
+        static_response.raise_for_status.return_value = None
+        live_response = Mock(content=self._vehicle_feed(timestamp=datetime.now(main.GTFS_TIMEZONE) - timedelta(minutes=3)))
+        live_response.raise_for_status.return_value = None
+        cache_patch = patch.object(main, "_gtfs_realtime_cache", {"expires_at": 0.0, "data": None})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
+        with patch.object(main.requests, "get", side_effect=[static_response, live_response]):
+            result = main.transit_departures("usj7")
+        self.assertEqual(result["departures"], [])
+
+    def test_usj7_does_not_substitute_schedule_when_no_live_vehicle_exists(self):
+        static_response = Mock(content=self.zip_bytes)
+        static_response.raise_for_status.return_value = None
+        empty_feed = main.gtfs_realtime_pb2.FeedMessage()
+        empty_feed.header.gtfs_realtime_version = "2.0"
+        live_response = Mock(content=empty_feed.SerializeToString())
+        live_response.raise_for_status.return_value = None
+        cache_patch = patch.object(main, "_gtfs_realtime_cache", {"expires_at": 0.0, "data": None})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
+        with patch.object(main.requests, "get", side_effect=[static_response, live_response]):
+            result = main.transit_departures("usj7")
+        self.assertEqual(result["departures"], [])
 
     def test_unknown_station_is_rejected(self):
         with self.assertRaises(HTTPException) as error:

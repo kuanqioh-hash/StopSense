@@ -27,7 +27,10 @@ type PassengerCount = {
   status: 'ok' | 'degraded' | 'offline' | 'error'
 }
 type View = 'passenger' | 'screen' | 'operations'
-type Route = { route: string; destination: string; headway: number; offset: number }
+type Route = { route: string; destination: string }
+type TransitStationOption = { id: string; name: string }
+type TransitDeparture = { route: string; destination: string; stop_name: string; scheduled_at: string; scheduled_time: string; minutes_until: number }
+type TransitStation = { id: string; name: string; stop_ids: string[]; stops: { stop_id: string; stop_name: string; stop_lat: string; stop_lon: string }[] }
 type SampleAccount = { id: string; name: string; initials: string; role: string; description: string; defaultView: View }
 
 const API = import.meta.env.VITE_API_URL || '/api'
@@ -47,6 +50,11 @@ const viewIcons: Record<View, string> = {
   screen: '▣',
   operations: '⌘',
 }
+const rapidKlStations: TransitStationOption[] = [
+  { id: 'usj7', name: 'USJ 7 (BRT & LRT)' },
+  { id: 'subang-jaya', name: 'LRT Subang Jaya' },
+  { id: 'putra-heights', name: 'LRT Putra Heights' },
+]
 
 function getSavedSampleAccount(): SampleAccount | null {
   try {
@@ -57,9 +65,11 @@ function getSavedSampleAccount(): SampleAccount | null {
   }
 }
 const routes: Route[] = [
-  { route: 'T1', destination: 'Town Centre', headway: 8, offset: 17 },
-  { route: 'T2', destination: 'MRT Station', headway: 12, offset: 103 },
-  { route: 'T3', destination: 'Community Mall', headway: 15, offset: 241 },
+  { route: 'SUNWAY LINE', destination: 'BRT Setia Jaya' },
+  { route: '641', destination: 'Pearl Point' },
+  { route: '752', destination: 'Hentian Bandar Shah Alam' },
+  { route: '770', destination: 'Hab Pasar Seni' },
+  { route: 'T776', destination: 'Subang Mewah' },
 ]
 
 const previewReadings: Reading[] = [
@@ -67,20 +77,6 @@ const previewReadings: Reading[] = [
   { id: 2, device_id: 'demo-stop-02', timestamp: new Date().toISOString(), temperature_c: 33.4, humidity_pct: 78, water_level_pct: 61, power_w: 15.1, cooler_on: true, crowd_level: 'High', crowd_source: 'simulated', fault_code: null },
   { id: 3, device_id: 'demo-stop-03', timestamp: new Date().toISOString(), temperature_c: 30.1, humidity_pct: 69, water_level_pct: 94, power_w: 0.4, cooler_on: false, crowd_level: 'Low', crowd_source: 'simulated', fault_code: 'STANDBY' },
 ]
-
-function getArrivals(stopId: string, now: number) {
-  const stopOffset = [...stopId].reduce((sum, character) => sum + character.charCodeAt(0), 0) % 180
-  return routes.flatMap((route) => {
-    const headway = route.headway * 60
-    const phase = (Math.floor(now / 1000) + route.offset + stopOffset) % headway
-    const first = Math.max(1, headway - phase)
-    return [0, 1].map((index) => ({
-      route: route.route,
-      destination: route.destination,
-      eta: first + index * headway,
-    }))
-  }).sort((a, b) => a.eta - b.eta)
-}
 
 function formatEta(seconds: number) {
   if (seconds < 60) return '<1min'
@@ -108,6 +104,12 @@ function App() {
   const [readings, setReadings] = useState<Reading[]>([])
   const [passengerCounts, setPassengerCounts] = useState<PassengerCount[]>([])
   const [selectedStop, setSelectedStop] = useState('')
+  const [selectedStationId, setSelectedStationId] = useState('usj7')
+  const [transitDepartures, setTransitDepartures] = useState<TransitDeparture[]>([])
+  const [transitStation, setTransitStation] = useState<TransitStation | null>(null)
+  const [transitFetchedAt, setTransitFetchedAt] = useState('')
+  const [transitLoading, setTransitLoading] = useState(true)
+  const [transitError, setTransitError] = useState('')
   const [selectedBusRoute, setSelectedBusRoute] = useState(routes[0].route)
   const view = activeAccount?.defaultView ?? 'passenger'
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -209,6 +211,39 @@ function App() {
     }
   }, [activeAccount])
 
+  useEffect(() => {
+    if (!activeAccount) return
+    let active = true
+    const loadDepartures = async () => {
+      try {
+        const response = await fetch(`${API}/transit/departures?station_id=${encodeURIComponent(selectedStationId)}`)
+        if (!response.ok) throw new Error(`RapidKL schedule request failed (${response.status})`)
+        const data = await response.json() as { station: TransitStation; departures: TransitDeparture[]; fetched_at: string }
+        if (!Array.isArray(data.departures) || !data.station) throw new Error('Unexpected RapidKL schedule response')
+        if (active) {
+          setTransitStation(data.station)
+          setTransitFetchedAt(data.fetched_at)
+          setTransitDepartures(data.departures)
+          setTransitError('')
+        }
+      } catch (cause) {
+        if (active) {
+          setTransitDepartures([])
+          setTransitError(cause instanceof Error ? cause.message : 'RapidKL schedule is unavailable')
+        }
+      } finally {
+        if (active) setTransitLoading(false)
+      }
+    }
+    setTransitLoading(true)
+    loadDepartures()
+    const refresh = window.setInterval(loadDepartures, 60_000)
+    return () => {
+      active = false
+      window.clearInterval(refresh)
+    }
+  }, [activeAccount, selectedStationId])
+
   const latest = useMemo(() => latestPerStop(readings), [readings])
   useEffect(() => {
     if (latest.length > 0 && !latest.some((reading) => reading.device_id === selectedStop)) {
@@ -217,7 +252,7 @@ function App() {
   }, [latest, selectedStop])
 
   const reading = latest.find((item) => item.device_id === selectedStop) ?? latest[0]
-  const arrivals = reading ? getArrivals(reading.device_id, now) : []
+  const stationName = transitStation?.name ?? rapidKlStations.find((station) => station.id === selectedStationId)?.name ?? 'RapidKL station'
   const routeOfferId = appLinkNotice?.kind === 'route' ? appLinkNotice.value.split('|').pop() ?? '' : ''
   const routeOffer = routeOfferId ? getOfferLinkDetails(routeOfferId) : null
 
@@ -252,7 +287,7 @@ function App() {
 
         <div className={`demo-notice ${usingPreview ? 'preview-notice' : ''}`}>
           <span className="notice-icon">{usingPreview ? '◷' : 'i'}</span>
-          <span><strong>{usingPreview ? 'PREVIEW DATA' : 'DEMO MODE'}</strong> — stop readings are {usingPreview ? 'example values shown because the API has no data' : 'simulated by the software device simulator'}. Bus arrival times are generated from a sample timetable, not live GPS.{error && <small className="notice-error">API connection: {error}. Start FastAPI and simulator.py to load readings.</small>}</span>
+          <span><strong>{usingPreview ? 'PREVIEW DATA' : 'DEMO MODE'}</strong> — stop readings are {usingPreview ? 'example values shown because the API has no data' : 'simulated by the software device simulator'}. RapidKL departures use scheduled GTFS data and are not live arrival predictions.{error && <small className="notice-error">API connection: {error}. Start FastAPI and simulator.py to load readings.</small>}</span>
         </div>
         {appLinkNotice && <div className="app-link-notice" role="status"><span><strong>{appLinkNotice.kind === 'voucher' ? `Sample voucher ${appLinkNotice.value}` : appLinkNotice.kind === 'route' && routeOffer ? `Directions to ${routeOffer.shop}` : appLinkNotice.kind === 'route' ? 'Sample shop directions opened' : `Sample journey alternatives from ${appLinkNotice.value}`}</strong><small>{appLinkNotice.kind === 'voucher' ? 'This demo code is not redeemable; a real voucher needs a participating shop integration.' : appLinkNotice.kind === 'route' && routeOffer ? `${routeOffer.walk} · ${routeOffer.route} · alight ${routeOffer.alight}. Sample only; live maps are not connected.` : 'This QR opens a prototype link. Live maps, transit routes and service disruption data are not connected.'}</small></span><button type="button" onClick={() => { window.location.hash = 'home'; setAppLinkNotice(null) }}>Dismiss</button></div>}
 
@@ -267,9 +302,14 @@ function App() {
               <label className="select-wrap"><span className="sr-only">Select bus stop</span><select value={reading.device_id} onChange={(event) => setSelectedStop(event.target.value)}>{latest.map((item) => <option key={item.device_id} value={item.device_id}>{item.device_id}</option>)}</select><span className="select-chevron">⌄</span></label>
             </div>
 
-            {view === 'passenger' && <PassengerView reading={reading} arrivals={arrivals} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} report={passengerCounts.filter((report) => report.bus_route === selectedBusRoute).sort((a, b) => b.observed_at.localeCompare(a.observed_at))[0]} />}
-            {view === 'screen' && <StopScreen reading={reading} arrivals={arrivals} />}
-            {view === 'operations' && <OperationsView readings={latest} reading={reading} arrivals={arrivals} />}
+            <div className="stop-toolbar transit-toolbar">
+              <div className="stop-label"><span className="pin">⌖</span><span><strong>RAPIDKL BUS SCHEDULE</strong><small>{transitLoading ? 'Loading GTFS schedule…' : `GTFS static · Feed refreshed ${formatTimestamp(transitFetchedAt)}`}</small></span></div>
+              <label className="select-wrap"><span className="sr-only">Select RapidKL station</span><select value={selectedStationId} onChange={(event) => { setTransitDepartures([]); setTransitStation(null); setTransitLoading(true); setSelectedStationId(event.target.value) }}>{rapidKlStations.map((station) => <option key={station.id} value={station.id}>{station.name}</option>)}</select><span className="select-chevron">⌄</span></label>
+            </div>
+            {transitError && <div className="notice-error" role="status">RapidKL schedule unavailable: {transitError}. Check that the backend can reach the official GTFS feed.</div>}
+            {view === 'passenger' && <PassengerView reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} error={transitError} now={now} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} report={passengerCounts.filter((report) => report.bus_route === selectedBusRoute).sort((a, b) => b.observed_at.localeCompare(a.observed_at))[0]} />}
+            {view === 'screen' && <StopScreen reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} />}
+            {view === 'operations' && <OperationsView readings={latest} reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} />}
             {view !== 'screen' && <SolarGeneration />}
             {view === 'operations' && <PassengerFlow reports={passengerCounts} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} />}
           </>
@@ -312,16 +352,19 @@ function AuthScreen({ onSignIn, theme, onToggleTheme }: { onSignIn: (account: Sa
   )
 }
 
-function PassengerView({ reading, arrivals, buses, selectedBusRoute, onBusChange, report }: { reading: Reading; arrivals: ReturnType<typeof getArrivals>; buses: Route[]; selectedBusRoute: string; onBusChange: (route: string) => void; report?: PassengerCount }) {
-  const nextBus = arrivals[0]
+function PassengerView({ reading, departures, stationName, loading, error, now, buses, selectedBusRoute, onBusChange, report }: { reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; error: string; now: number; buses: Route[]; selectedBusRoute: string; onBusChange: (route: string) => void; report?: PassengerCount }) {
+  const nextBus = departures[0]
+  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(departure.scheduled_at).getTime() - now) / 60000))
   return (
     <section className="passenger-grid">
       <article className="arrival-card">
-        <div className="card-topline"><span className="card-kicker">NEXT BUS ARRIVAL</span><span className="simulated-tag">SIMULATED</span></div>
-        <div className="arrival-main"><div><span className="route-chip">{nextBus.route}</span><span className="destination">{nextBus.destination}</span></div><strong>{formatEta(nextBus.eta)}</strong></div>
-        <div className="arrival-progress"><span style={{ width: `${Math.max(8, 100 - nextBus.eta / 900 * 100)}%` }} /></div>
-        <div className="arrival-foot"><span>Sample scheduled service</span><span>Times may vary</span></div>
-        <div className="upcoming-list">{arrivals.slice(1, 3).map((bus) => <div className="upcoming-row" key={`${bus.route}-${bus.eta}`}><span><b>{bus.route}</b> · {bus.destination}</span><strong>{formatEta(bus.eta)}</strong></div>)}</div>
+        <div className="card-topline"><span className="card-kicker">{stationName} · SCHEDULE</span><span className="simulated-tag">RAPIDKL GTFS</span></div>
+        {nextBus ? <>
+          <div className="arrival-main"><div><span className="route-chip">{nextBus.route}</span><span className="destination">{nextBus.destination}</span></div><strong>{formatEta(minutesUntil(nextBus) * 60)}</strong></div>
+          <div className="arrival-progress"><span style={{ width: `${Math.max(8, 100 - minutesUntil(nextBus) / 60 * 100)}%` }} /></div>
+          <div className="arrival-foot"><span>{nextBus.stop_name}</span><span>Scheduled {nextBus.scheduled_time}</span></div>
+          <div className="upcoming-list">{departures.slice(1, 3).map((bus) => <div className="upcoming-row" key={`${bus.route}-${bus.scheduled_at}`}><span><b>{bus.route}</b> · {bus.destination} <small>{bus.stop_name}</small></span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>)}</div>
+        </> : <div className="bus-crowd-reading bus-crowd-inactive"><strong>{loading ? 'Loading schedule…' : error ? 'Schedule unavailable' : 'No more scheduled departures'}</strong><span>Scheduled times are provided from RapidKL static GTFS data, not live bus positions.</span></div>}
       </article>
 
       <article className="comfort-card">
@@ -386,21 +429,22 @@ function PassengerFlow({ reports, buses, selectedBusRoute, onBusChange }: { repo
   )
 }
 
-function StopScreen({ reading, arrivals }: { reading: Reading; arrivals: ReturnType<typeof getArrivals> }) {
+function StopScreen({ reading, departures, stationName, loading, now }: { reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number }) {
+  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(departure.scheduled_at).getTime() - now) / 60000))
   return (
     <section className="screen-wrap">
       <div className="screen-device">
         <div className="screen-header"><span className="screen-logo">C</span><span>CoolStop <small>SMART BUS STOP</small></span><span className="screen-clock">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div>
         <div className="screen-content-grid">
           <section className="screen-arrivals-panel" aria-label="Upcoming bus arrivals">
-            <div className="screen-next-label">UPCOMING BUSES <span className="simulated-tag">SIMULATED</span></div>
+            <div className="screen-next-label">{stationName} · SCHEDULE <span className="simulated-tag">RAPIDKL GTFS</span></div>
             <div className="screen-arrivals">
-              {arrivals.slice(0, 6).map((bus, index) => (
-                <article className="screen-arrival-card" key={`${bus.route}-${index}`}>
-                  <div className="screen-arrival-card-top"><span className="screen-route small">{bus.route}</span><strong>{formatEta(bus.eta)}</strong></div>
-                  <span className="screen-arrival-destination">{bus.destination}</span>
+              {departures.length > 0 ? departures.map((bus) => (
+                <article className="screen-arrival-card" key={`${bus.route}-${bus.scheduled_at}`}>
+                  <div className="screen-arrival-card-top"><span className="screen-route small">{bus.route}</span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>
+                  <span className="screen-arrival-destination">{bus.destination} · {bus.scheduled_time}</span>
                 </article>
-              ))}
+              )) : <p>{loading ? 'Loading RapidKL schedule…' : 'No scheduled departures available.'}</p>}
             </div>
           </section>
         </div>
@@ -417,15 +461,16 @@ function StopScreen({ reading, arrivals }: { reading: Reading; arrivals: ReturnT
         </section>
         <div className="screen-info"><span><i className="screen-sun">☀</i> {reading.temperature_c.toFixed(1)}°C <small>Temperature</small></span><span><i className="screen-humidity">≈</i> {Math.round(reading.humidity_pct)}% <small>Humidity</small></span><span><i className="screen-crowd">♙</i> {reading.crowd_level} <small>Waiting crowd</small></span></div>
         <ScreenSampleAd stopId={reading.device_id} />
-        <div className="screen-footer">Arrival estimates for demonstration · Scan an ad QR to continue on your phone</div>
+        <div className="screen-footer">Scheduled departures from RapidKL GTFS · Not live arrival predictions · Scan an ad QR to continue on your phone</div>
       </div>
-      <div className="screen-notes"><span className="screen-note-icon">▣</span><div><strong>Designed for a quick glance</strong><p>Upcoming services are shown together for easy comparison. This view is a screen mock-up; arrival estimates are simulated.</p></div></div>
+      <div className="screen-notes"><span className="screen-note-icon">▣</span><div><strong>Designed for a quick glance</strong><p>Scheduled departures are sourced from RapidKL static GTFS; actual bus arrival times may differ.</p></div></div>
     </section>
   )
 }
 
-function OperationsView({ readings, reading, arrivals }: { readings: Reading[]; reading: Reading; arrivals: ReturnType<typeof getArrivals> }) {
+function OperationsView({ readings, reading, departures, stationName, loading, now }: { readings: Reading[]; reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number }) {
   const fault = reading.fault_code
+  const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(departure.scheduled_at).getTime() - now) / 60000))
   const state = fault ? 'Needs attention' : reading.cooler_on === null ? 'Partial telemetry' : reading.cooler_on ? 'Cooling active' : 'Standby'
   return (
     <section className="operations-view">
@@ -438,7 +483,7 @@ function OperationsView({ readings, reading, arrivals }: { readings: Reading[]; 
       </div>
       {fault && <div className="fault-banner"><strong>Fault reported: {fault}</strong><span>Inspect the device and confirm water and sensor status.</span></div>}
       <div className="ops-lower-grid">
-        <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">SERVICE ESTIMATE</span><h3>Upcoming arrivals</h3></div><span className="simulated-tag">SIMULATED</span></div>{arrivals.slice(0, 3).map((bus) => <div className="service-row" key={`${bus.route}-${bus.eta}`}><span className="route-chip small">{bus.route}</span><span className="service-destination">{bus.destination}</span><strong>{formatEta(bus.eta)}</strong></div>)}<p className="panel-footnote">Headway-based demo values. Connect an authorized transit feed for live ETAs.</p></article>
+        <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">RAPIDKL GTFS STATIC</span><h3>{stationName} departures</h3></div><span className="simulated-tag">SCHEDULED</span></div>{departures.length > 0 ? departures.slice(0, 3).map((bus) => <div className="service-row" key={`${bus.route}-${bus.scheduled_at}`}><span className="route-chip small">{bus.route}</span><span className="service-destination">{bus.destination}</span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>) : <p>{loading ? 'Loading schedule…' : 'No scheduled departures available.'}</p>}<p className="panel-footnote">These are timetable departures, not realtime predictions; actual bus arrivals may differ.</p></article>
         <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">DEVICE HEALTH</span><h3>{reading.device_id}</h3></div><span className="device-dot"><i /> Online</span></div><div className="health-row"><span>Waiting-area crowd</span><strong>{reading.crowd_level}</strong></div><div className="health-row"><span>Crowd data source</span><strong>{reading.crowd_source}</strong></div><div className="health-row"><span>Last sensor update</span><strong>{formatTimestamp(reading.timestamp)}</strong></div><div className="health-row"><span>Cooler state</span><strong>{reading.cooler_on === null ? 'Not reported' : reading.cooler_on ? 'On' : 'Off'}</strong></div></article>
       </div>
       <div className="site-summary"><div><strong>{readings.length}</strong><span>stops reporting</span></div><div><strong>{readings.filter((item) => item.cooler_on).length}</strong><span>coolers running</span></div><div><strong>{readings.filter((item) => Boolean(item.fault_code)).length}</strong><span>faults reported</span></div><small>Live server-pushed telemetry · Demonstration values only</small></div>

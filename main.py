@@ -1,19 +1,48 @@
 import asyncio
+import csv
+import io
 import json
 import os
 import sqlite3
 import threading
+import time
+import zipfile
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Query, Request
+import requests
+
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 DB_PATH = Path(os.environ.get("TELEMETRY_DB", "telemetry.db"))
+GTFS_STATIC_URL = os.environ.get(
+    "GTFS_STATIC_URL",
+    "https://api.data.gov.my/gtfs-static/prasarana?category=rapid-bus-kl",
+)
+GTFS_CACHE_SECONDS = 24 * 60 * 60
+GTFS_TIMEZONE = ZoneInfo("Asia/Kuala_Lumpur")
+GTFS_STATIONS = {
+    "usj7": {
+        "name": "USJ 7 (BRT & LRT)",
+        "stops": ("1005834", "1006526"),
+    },
+    "subang-jaya": {
+        "name": "LRT Subang Jaya",
+        "stops": ("1006524",),
+    },
+    "putra-heights": {
+        "name": "LRT Putra Heights",
+        "stops": ("1006550",),
+    },
+}
+_gtfs_cache: dict[str, object] = {"expires_at": 0.0, "data": None}
+_gtfs_cache_lock = threading.Lock()
 
 app = FastAPI(title="Bus Stop Telemetry Demo", version="0.1.0")
 app.add_middleware(
@@ -176,6 +205,152 @@ initialize_db()
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "bus-stop-telemetry-demo"}
+
+
+def _parse_gtfs_time(value: str, service_date: date) -> datetime:
+    hours, minutes, seconds = (int(part) for part in value.split(":"))
+    return datetime.combine(service_date, datetime.min.time(), GTFS_TIMEZONE) + timedelta(
+        hours=hours, minutes=minutes, seconds=seconds
+    )
+
+
+def _active_services(
+    calendar_rows: list[dict[str, str]],
+    service_date: date,
+    calendar_date_rows: list[dict[str, str]] | None = None,
+) -> set[str]:
+    weekday = service_date.strftime("%A").lower()
+    service_key = service_date.strftime("%Y%m%d")
+    active = {
+        row["service_id"]
+        for row in calendar_rows
+        if row.get(weekday) == "1"
+        and row.get("start_date", "") <= service_key <= row.get("end_date", "")
+    }
+    for row in calendar_date_rows or []:
+        if row.get("date") != service_key:
+            continue
+        if row.get("exception_type") == "1":
+            active.add(row["service_id"])
+        elif row.get("exception_type") == "2":
+            active.discard(row["service_id"])
+    return active
+
+
+def _download_gtfs() -> dict[str, object]:
+    with _gtfs_cache_lock:
+        cached = _gtfs_cache["data"]
+        if cached is not None and float(_gtfs_cache["expires_at"]) > time.monotonic():
+            return cached  # type: ignore[return-value]
+
+        try:
+            response = requests.get(GTFS_STATIC_URL, timeout=30)
+            response.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+                def read_csv(filename: str) -> list[dict[str, str]]:
+                    with archive.open(filename) as file:
+                        return list(csv.DictReader(io.TextIOWrapper(file, encoding="utf-8-sig")))
+
+                stops = {row["stop_id"]: row for row in read_csv("stops.txt")}
+                routes = {row["route_id"]: row for row in read_csv("routes.txt")}
+                trips = {row["trip_id"]: row for row in read_csv("trips.txt")}
+                archive_files = set(archive.namelist())
+                calendar_rows = read_csv("calendar.txt") if "calendar.txt" in archive_files else []
+                calendar_date_rows = (
+                    read_csv("calendar_dates.txt")
+                    if "calendar_dates.txt" in archive_files
+                    else []
+                )
+                stop_ids = {
+                    stop_id for station in GTFS_STATIONS.values() for stop_id in station["stops"]
+                }
+                departures = []
+                for row in read_csv("stop_times.txt"):
+                    if row["stop_id"] not in stop_ids:
+                        continue
+                    trip = trips.get(row["trip_id"])
+                    route = routes.get(trip["route_id"]) if trip else None
+                    if trip is None or route is None:
+                        continue
+                    departures.append({
+                        "stop_id": row["stop_id"],
+                        "stop_name": stops.get(row["stop_id"], {}).get("stop_name", ""),
+                        "route": route.get("route_short_name", ""),
+                        "destination": trip.get("trip_headsign") or route.get("route_long_name", ""),
+                        "service_id": trip["service_id"],
+                        "departure_time": row.get("departure_time") or row["arrival_time"],
+                    })
+                feed: dict[str, object] = {
+                    "stations": [
+                        {
+                            "id": station_id,
+                            "name": station["name"],
+                            "stop_ids": list(station["stops"]),
+                            "stops": [stops[stop_id] for stop_id in station["stops"] if stop_id in stops],
+                        }
+                        for station_id, station in GTFS_STATIONS.items()
+                    ],
+                    "calendar": calendar_rows,
+                    "calendar_dates": calendar_date_rows,
+                    "departures": departures,
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                }
+        except (requests.RequestException, zipfile.BadZipFile, KeyError, csv.Error) as exc:
+            raise HTTPException(status_code=503, detail="RapidKL GTFS schedule is temporarily unavailable") from exc
+
+        _gtfs_cache["data"] = feed
+        _gtfs_cache["expires_at"] = time.monotonic() + GTFS_CACHE_SECONDS
+        return feed
+
+
+@app.get("/transit/stops")
+def transit_stops() -> dict[str, object]:
+    feed = _download_gtfs()
+    return {"stations": feed["stations"], "source": "RapidKL GTFS Static", "fetched_at": feed["fetched_at"]}
+
+
+@app.get("/transit/departures")
+def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> dict[str, object]:
+    if station_id not in GTFS_STATIONS:
+        raise HTTPException(status_code=404, detail="Unknown RapidKL station")
+
+    feed = _download_gtfs()
+    now = datetime.now(GTFS_TIMEZONE)
+    calendar_rows = feed["calendar"]
+    calendar_date_rows = feed["calendar_dates"]
+    departures = feed["departures"]
+    station_stop_ids = set(GTFS_STATIONS[station_id]["stops"])
+    results = []
+    for service_date in (
+        now.date() - timedelta(days=1),
+        now.date(),
+        now.date() + timedelta(days=1),
+    ):
+        active = _active_services(calendar_rows, service_date, calendar_date_rows)
+        for item in departures:
+            if item["stop_id"] not in station_stop_ids or item["service_id"] not in active:
+                continue
+            scheduled = _parse_gtfs_time(item["departure_time"], service_date)
+            if scheduled >= now:
+                results.append({
+                    "route": item["route"],
+                    "destination": item["destination"],
+                    "stop_name": item["stop_name"],
+                    "scheduled_at": scheduled.isoformat(),
+                    "scheduled_time": scheduled.strftime("%H:%M"),
+                    "minutes_until": max(0, int((scheduled - now).total_seconds() / 60 + 0.999)),
+                })
+    results.sort(key=lambda item: item["scheduled_at"])
+    station = next(item for item in feed["stations"] if item["id"] == station_id)
+    return {
+        "station": station,
+        "stop_ids": station["stop_ids"],
+        "departures": results[:6],
+        "source": "RapidKL GTFS Static",
+        "realtime": False,
+        "fetched_at": feed["fetched_at"],
+        "checked_at": now.isoformat(),
+    }
 
 
 @app.post("/telemetry", status_code=201)

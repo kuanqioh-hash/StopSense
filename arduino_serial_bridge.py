@@ -61,7 +61,7 @@ def post_reading(api_url: str, payload: dict[str, object]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Forward SHT31 readings from an Arduino Uno to the StopSense API")
+    parser = argparse.ArgumentParser(description="Forward SHT31 readings from an Arduino Uno or ESP32 to the StopSense API")
     parser.add_argument("--port", default=os.environ.get("SERIAL_PORT"), help="USB serial port, e.g. /dev/cu.usbmodem1101 or COM3")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate (must match the Arduino sketch)")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="FastAPI telemetry endpoint")

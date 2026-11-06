@@ -6,7 +6,7 @@ A local prototype with a **React + TypeScript frontend**, FastAPI telemetry API,
 Python simulator → FastAPI /telemetry → SQLite → React + TypeScript (Vite)
 ```
 
-All device readings and bus arrivals are synthetic unless you connect an approved real data source. The API has no authentication and is intended for local demonstration only; do not expose it to the public internet.
+Device readings are synthetic unless you connect a sensor. Bus departures use RapidKL's static GTFS timetable; they are scheduled times, not real-time predictions. The API has no authentication and is intended for local demonstration only; do not expose it to the public internet.
 
 ## Requirements
 
@@ -102,21 +102,25 @@ The reference does **not** provide a separate display wattage: 15 W is labelled 
 
 The frontend opens a Server-Sent Events connection to `GET /events/telemetry`. The API sends an initial telemetry/passenger-count snapshot and pushes a refreshed snapshot when either ingestion endpoint receives data. EventSource reconnects automatically; bus arrival countdowns continue to update locally each second. The development proxy forwards `/api/events/telemetry` to FastAPI. For a hosted split frontend/backend, set `VITE_API_URL` to the backend base URL and allow the frontend origin in the API CORS configuration.
 
-### Simulated bus arrivals
+### RapidKL scheduled bus departures
 
-ETAs are generated in the frontend from example route headways, not live bus GPS. They are labelled simulated in all views. Passenger view includes a hands-free two-ad carousel that slides between time-based sample nearby-shop offers every 15 seconds, expandable shop details, sample walk/bus/alight directions, locally generated QR codes for demo voucher and route links, a location-permission prompt, sample disruption alternatives, and a comparison of fictional e-hailing providers. The non-touchscreen stop display rotates two sample ad slides automatically every 15 seconds, sliding horizontally to reveal the next ad and then returning to the first. Each slide keeps its ad creative, route or promo details, and QR code visible without requiring interaction; the separate journey-alternatives QR was removed to keep this area uncluttered. QR scans reopen the demo app and display a prototype notice; voucher redemption, map navigation and live service data are not integrated. No user location is stored or sent to the API; location access is only requested after the user presses the button. The demo does not use coordinates for routing: even after permission is granted, the sample alternatives are still based on the selected stop until an approved map/transit routing source is integrated.
+The passenger, stop-screen, and operations views can select **USJ 7 (BRT & LRT)**, **LRT Subang Jaya**, or **LRT Putra Heights**. The FastAPI backend fetches RapidKL/Prasarana's official static GTFS feed and uses its stop, route, trip, service-calendar, and stop-time records to display upcoming scheduled departures. USJ 7 combines the GTFS stops `1005834` (STESEN BRT USJ7) and `1006526` (SJ693 LRT USJ 7); the other station stops are `1006524` (SJ63 LRT SUBANG JAYA) and `1006550` (SJ705 LRT PUTRA HEIGHT). The backend caches the static ZIP for 24 hours to stay well below data.gov.my's rate limit. `GET /transit/stops` lists station metadata and `GET /transit/departures?station_id=usj7` returns the next scheduled departures. The station IDs are `usj7`, `subang-jaya`, and `putra-heights`.
 
-The disruption control is a local simulation, not a real disruption feed. Alternative bus routes, fare estimates, pickup ETAs and vehicle types are fictional examples. Selecting “continue” does not place an order or contact a provider. Public transport alternatives are shown first; real multi-provider quotes and booking require transit/map feeds and each e-hailing company’s agreement and API integration. Shop names/offers are also fictional and do not imply a partnership. For real arrivals, connect an authorized transit API or GTFS-Realtime feed and report its source and update time. Crowd level means people waiting at the stop, **not occupancy onboard a bus**.
+These are **timetable departures, not live arrival predictions**. GTFS-Realtime vehicle positions do not provide trip-update arrival predictions, so the dashboard does not imply that a scheduled departure is a live GPS ETA. Bus arrival times may differ from the schedule. The RapidKL feed is licensed CC BY 4.0; attribution: “Transit data: RapidKL/Prasarana via data.gov.my GTFS.” Deploy the updated FastAPI backend and frontend together. If the feed is unreachable, the dashboard reports schedule unavailability instead of silently showing fabricated times.
 
-## Arduino Uno + SHT31 over USB
+Passenger view still includes a hands-free two-ad carousel that slides between time-based sample nearby-shop offers every 15 seconds, expandable shop details, sample walk/bus/alight directions, locally generated QR codes for demo voucher and route links, a location-permission prompt, sample disruption alternatives, and a comparison of fictional e-hailing providers. The non-touchscreen stop display rotates two sample ad slides automatically every 15 seconds. QR scans reopen the demo app and display a prototype notice; voucher redemption, map navigation and live service data are not integrated. No user location is stored or sent to the API; location access is only requested after the user presses the button. The demo does not use coordinates for routing: even after permission is granted, the sample alternatives are still based on the selected stop until an approved map/transit routing source is integrated.
 
-For an Arduino Uno connected to the computer by USB, a small Python bridge forwards SHT31 readings to FastAPI. The Uno has no Wi-Fi; keep the computer and API reachable while the bridge runs.
+The disruption control is a local simulation, not a real disruption feed. Alternative bus routes, fare estimates, pickup ETAs and vehicle types are fictional examples. Selecting “continue” does not place an order or contact a provider. Public transport alternatives are shown first; real multi-provider quotes and booking require each e-hailing company's agreement and API integration. Shop names/offers are also fictional and do not imply a partnership. Crowd level means people waiting at the stop, **not occupancy onboard a bus**.
 
-**Wire the SHT31 breakout with power disconnected:** connect SDA to Uno A4, SCL to A5, GND to GND, and VIN/VCC to the voltage supported by your breakout board. Many breakout boards accept 3.3–5 V, but check its documentation; use a logic-level shifter if the board is 3.3 V-only and not 5 V tolerant. The default I2C address in the sketch is `0x44`.
+## Arduino Uno or ESP32 + SHT31 over USB
 
-In Arduino IDE, select **Arduino Uno** and its USB port, install **Adafruit SHT31 Library** (including its prompted dependencies), then open `arduino/UnoSHT31/UnoSHT31.ino` and upload it. The sketch emits `SHT31,<temperature C>,<relative humidity %>` records at 115200 baud every five seconds. If the sensor is not found, check wiring and I2C address; the sketch reports an error and retries.
+Both supported boards use the same sketch and Python USB-serial bridge: the board sends readings over USB to a computer, and the bridge forwards them to FastAPI. The Uno has no Wi-Fi; the ESP32 could send directly over Wi-Fi with a separately configured firmware, but this shared path does not need Wi-Fi credentials on either board. Keep the computer and API reachable while the bridge runs.
 
-Install the serial bridge dependency and start FastAPI as described above. In another terminal from the project root, set the Arduino's serial port and run:
+**Wire the SHT31 breakout with board power disconnected.** For Uno, SDA is A4 and SCL is A5. For a typical ESP32 DevKit, SDA is GPIO21 and SCL is GPIO22; check the pinout for your exact ESP32 board and change `SHT31_SDA_PIN` / `SHT31_SCL_PIN` at the top of the sketch if needed. Connect GND to GND and VIN/VCC only to a voltage supported by the breakout. ESP32 GPIO is 3.3 V only: ensure I2C pull-ups are to 3.3 V and do not connect a 5 V pull-up to ESP32 pins. The default I2C address in the sketch is `0x44`.
+
+In Arduino IDE, install the board support package for your board (Arduino AVR Boards for Uno or Espressif ESP32), select the exact board and USB port, install **Adafruit SHT31 Library** (including its prompted dependencies), then open `arduino/SHT31USB/SHT31USB.ino` and upload it. The ESP32 code sets default I2C pins to 21/22; some ESP32 variants use different pins. Both boards emit the same `SHT31,<temperature C>,<relative humidity %>` records at 115200 baud every five seconds. If the sensor is not found, check wiring, configured pins, and I2C address; the sketch reports an error and retries.
+
+Install the serial bridge dependencies and start FastAPI as described above. In another terminal from the project root, set the board's USB serial port and run the same command for either board:
 
 ```bash
 python -m pip install -r requirements-arduino.txt
@@ -129,7 +133,7 @@ For a hosted API, pass its full telemetry endpoint using `--api-url`, for exampl
 
 ## Shared ESP32/FastAPI payload
 
-The simulator sends this schema to `POST /telemetry`; a future ESP32 can send the same JSON using HTTP POST with `Content-Type: application/json`:
+The simulator and USB serial bridge send this schema to `POST /telemetry`. Firmware with network access (for example, an ESP32 program using Wi-Fi) can send the same JSON using HTTP POST with `Content-Type: application/json`; the shared SHT31 sketch in this project uses USB serial instead:
 
 ```json
 {
@@ -184,11 +188,11 @@ Validate crossing logic without a camera or optional CV packages:
 
 ```bash
 python bus_counter.py --self-test
-python -m unittest test_passenger_counts.py
+python -m unittest test_passenger_counts.py test_transit_gtfs.py
 ```
 
 By default, the SQLite file is `telemetry.db` in the current directory. Set `TELEMETRY_DB` to change its path.
 
-## Moving from simulation to ESP32
+## ESP32 direct Wi-Fi option
 
-Keep the FastAPI payload contract unchanged. First test a real device on a trusted local network and point it at the computer's LAN address, e.g. `http://192.168.1.20:8000/telemetry` (not `localhost`, which would refer to the ESP32 itself). For deployment, add device authentication, HTTPS with certificate validation, access control, retention limits, and robust offline buffering. Keep safety-critical cooling control on the ESP32; the dashboard/server should monitor it, not be required for safe operation.
+The shared SHT31 sketch above uses USB serial on both Uno and ESP32, with the Python bridge handling internet/API communication. If you later implement direct ESP32 Wi-Fi posting, keep the same FastAPI payload contract and point it at the computer's LAN address for local tests (for example `http://192.168.1.20:8000/telemetry`, not `localhost`, which refers to the ESP32 itself). For public deployment, use HTTPS with certificate validation, device authentication, access control, retention limits, and robust offline buffering. Never disable TLS certificate checks. Keep safety-critical cooling control on the ESP32; the dashboard/server should monitor it, not be required for safe operation.

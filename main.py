@@ -34,6 +34,8 @@ GTFS_REALTIME_URL = os.environ.get(
 )
 GTFS_CACHE_SECONDS = 24 * 60 * 60
 GTFS_REALTIME_CACHE_SECONDS = 25
+GTFS_REALTIME_MAX_POSITION_AGE_SECONDS = 10 * 60
+GTFS_REALTIME_FRESH_POSITION_SECONDS = 2 * 60
 GTFS_TIMEZONE = ZoneInfo("Asia/Kuala_Lumpur")
 GTFS_STATIONS = {
     "usj7": {
@@ -54,6 +56,7 @@ _gtfs_cache: dict[str, object] = {"expires_at": 0.0, "data": None}
 _gtfs_cache_lock = threading.Lock()
 _gtfs_realtime_cache: dict[str, object] = {"expires_at": 0.0, "data": None}
 _gtfs_realtime_cache_lock = threading.Lock()
+_gtfs_realtime_last_known: dict[str, dict[str, object]] = {}
 
 app = FastAPI(title="Bus Stop Telemetry Demo", version="0.1.0")
 app.add_middleware(
@@ -275,7 +278,7 @@ def _download_gtfs() -> dict[str, object]:
                 stop_ids = {
                     stop_id for station in GTFS_STATIONS.values() for stop_id in station["stops"]
                 }
-                live_stop_ids = set(GTFS_STATIONS["usj7"]["stops"])
+                realtime_stop_ids = stop_ids
                 departures = []
                 live_trip_ids: set[str] = set()
                 for row in read_csv("stop_times.txt"):
@@ -285,7 +288,7 @@ def _download_gtfs() -> dict[str, object]:
                     route = routes.get(trip["route_id"]) if trip else None
                     if trip is None or route is None:
                         continue
-                    if row["stop_id"] in live_stop_ids:
+                    if row["stop_id"] in realtime_stop_ids:
                         live_trip_ids.add(row["trip_id"])
                     stop = stops.get(row["stop_id"], {})
                     departures.append({
@@ -345,6 +348,20 @@ def transit_stops() -> dict[str, object]:
     return {"stations": feed["stations"], "source": "RapidKL GTFS Static", "fetched_at": feed["fetched_at"]}
 
 
+def _available_last_known_vehicles(now_epoch: float | None = None) -> list[dict[str, object]]:
+    now_epoch = now_epoch or time.time()
+    expired_ids = [
+        vehicle_id for vehicle_id, vehicle in _gtfs_realtime_last_known.items()
+        if now_epoch - float(vehicle["timestamp"]) > GTFS_REALTIME_MAX_POSITION_AGE_SECONDS
+    ]
+    for vehicle_id in expired_ids:
+        del _gtfs_realtime_last_known[vehicle_id]
+    return [
+        vehicle for vehicle in _gtfs_realtime_last_known.values()
+        if now_epoch - float(vehicle["timestamp"]) >= -30
+    ]
+
+
 def _download_gtfs_realtime() -> list[dict[str, object]]:
     with _gtfs_realtime_cache_lock:
         cached = _gtfs_realtime_cache["data"]
@@ -357,14 +374,13 @@ def _download_gtfs_realtime() -> list[dict[str, object]]:
             feed.ParseFromString(response.content)
             if not feed.IsInitialized():
                 raise ValueError("Incomplete GTFS-Realtime feed")
-            vehicles = []
             for entity in feed.entity:
                 if not entity.HasField("vehicle") or not entity.vehicle.HasField("position"):
                     continue
                 vehicle = entity.vehicle
                 if not vehicle.HasField("trip") or not vehicle.trip.trip_id:
                     continue
-                vehicles.append({
+                position = {
                     "id": vehicle.vehicle.id if vehicle.HasField("vehicle") else entity.id,
                     "trip_id": vehicle.trip.trip_id,
                     "route_id": vehicle.trip.route_id,
@@ -373,9 +389,18 @@ def _download_gtfs_realtime() -> list[dict[str, object]]:
                     "bearing": vehicle.position.bearing if vehicle.position.HasField("bearing") else None,
                     "speed": vehicle.position.speed if vehicle.position.HasField("speed") else None,
                     "timestamp": vehicle.timestamp if vehicle.HasField("timestamp") else feed.header.timestamp,
-                })
+                }
+                vehicle_id = str(position["id"] or f'{position["trip_id"]}:{position["route_id"]}')
+                previous = _gtfs_realtime_last_known.get(vehicle_id)
+                if previous is None or float(position["timestamp"]) >= float(previous["timestamp"]):
+                    _gtfs_realtime_last_known[vehicle_id] = position
         except (requests.RequestException, DecodeError, ValueError) as exc:
-            raise HTTPException(status_code=503, detail="RapidKL live vehicle positions are temporarily unavailable") from exc
+            vehicles = _available_last_known_vehicles()
+            if not vehicles:
+                raise HTTPException(status_code=503, detail="RapidKL live vehicle positions are temporarily unavailable") from exc
+        else:
+            vehicles = _available_last_known_vehicles()
+
         _gtfs_realtime_cache["data"] = vehicles
         _gtfs_realtime_cache["expires_at"] = time.monotonic() + GTFS_REALTIME_CACHE_SECONDS
         return vehicles
@@ -403,8 +428,8 @@ def _distance_along_shape(points: list[dict[str, float]], start: int, end: int) 
     )
 
 
-def _live_usj7_departures(feed: dict[str, object], now: datetime) -> list[dict[str, object]]:
-    station_stop_ids = set(GTFS_STATIONS["usj7"]["stops"])
+def _live_station_departures(feed: dict[str, object], station_id: str, now: datetime) -> list[dict[str, object]]:
+    station_stop_ids = set(GTFS_STATIONS[station_id]["stops"])
     stop_departures = [item for item in feed["departures"] if item["stop_id"] in station_stop_ids]
     trips = {item["trip_id"]: item for item in stop_departures}
     by_trip = {}
@@ -412,10 +437,6 @@ def _live_usj7_departures(feed: dict[str, object], now: datetime) -> list[dict[s
         by_trip.setdefault(item["trip_id"], []).append(item)
     shapes = feed["shapes"]
     live_vehicles = _download_gtfs_realtime()
-    active_services_by_date = {
-        service_date: _active_services(feed["calendar"], service_date, feed["calendar_dates"])
-        for service_date in (now.date() - timedelta(days=1), now.date())
-    }
     results = []
     seen_vehicles = set()
     for vehicle in live_vehicles:
@@ -430,16 +451,15 @@ def _live_usj7_departures(feed: dict[str, object], now: datetime) -> list[dict[s
         if not shape or len(shape) < 2:
             continue
         timestamp = datetime.fromtimestamp(float(vehicle["timestamp"]), timezone.utc)
-        age_seconds = (datetime.now(timezone.utc) - timestamp).total_seconds()
-        if age_seconds < -30 or age_seconds > 120:
+        age_seconds = max(0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+        if age_seconds > GTFS_REALTIME_MAX_POSITION_AGE_SECONDS:
             continue
         position_index, off_route = _nearest_shape_point(float(vehicle["lat"]), float(vehicle["lon"]), shape)
         if off_route > 400:
             continue
         speed = float(vehicle["speed"] or 0)
-        if speed > 0 and not 2 <= speed <= 20:
-            continue
-        speed = speed if speed > 0 else 5.0
+        if not 2 <= speed <= 20:
+            speed = 5.0
         for occurrence in occurrences:
             shape_stop_index, stop_offset = _nearest_shape_point(
                 float(occurrence["stop_lat"]), float(occurrence["stop_lon"]), shape
@@ -459,20 +479,8 @@ def _live_usj7_departures(feed: dict[str, object], now: datetime) -> list[dict[s
             remaining_meters = _distance_along_shape(shape, position_index, shape_stop_index) + stop_offset
             if remaining_meters > 20_000:
                 continue
-            eta_seconds = max(0, int(remaining_meters / speed))
+            eta_seconds = max(0, int(remaining_meters / speed) - int(age_seconds))
             estimated_at = now + timedelta(seconds=eta_seconds)
-            schedule_candidates = [
-                _parse_gtfs_time(occurrence["departure_time"], service_date)
-                for service_date in active_services_by_date
-                if occurrence["service_id"] in active_services_by_date[service_date]
-            ]
-            schedule_candidates = [
-                scheduled for scheduled in schedule_candidates
-                if abs((scheduled - now).total_seconds()) <= 6 * 60 * 60
-            ]
-            if not schedule_candidates:
-                continue
-            scheduled_at = min(schedule_candidates, key=lambda scheduled: abs((scheduled - now).total_seconds()))
             vehicle_id = str(vehicle["id"])
             if vehicle_id in seen_vehicles:
                 continue
@@ -486,6 +494,8 @@ def _live_usj7_departures(feed: dict[str, object], now: datetime) -> list[dict[s
                 "minutes_until": int((eta_seconds + 59) / 60),
                 "vehicle_id": vehicle_id,
                 "position_updated_at": timestamp.isoformat(),
+                "position_age_seconds": int(age_seconds),
+                "stale_position": age_seconds > GTFS_REALTIME_FRESH_POSITION_SECONDS,
             })
     results.sort(key=lambda item: item["arrival_at"])
     return results[:6]
@@ -499,52 +509,16 @@ def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> 
     feed = _download_gtfs()
     now = datetime.now(GTFS_TIMEZONE)
     station = next(item for item in feed["stations"] if item["id"] == station_id)
-    if station_id == "usj7":
-        return {
-            "station": station,
-            "stop_ids": station["stop_ids"],
-            "departures": _live_usj7_departures(feed, now),
-            "source": "RapidKL GTFS-Realtime vehicle positions (estimated)",
-            "realtime": True,
-            "estimate": True,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "checked_at": now.isoformat(),
-        }
-
-    calendar_rows = feed["calendar"]
-    calendar_date_rows = feed["calendar_dates"]
-    departures = feed["departures"]
-    station_stop_ids = set(GTFS_STATIONS[station_id]["stops"])
-    results = []
-    for service_date in (
-        now.date() - timedelta(days=1),
-        now.date(),
-        now.date() + timedelta(days=1),
-    ):
-        active = _active_services(calendar_rows, service_date, calendar_date_rows)
-        for item in departures:
-            if item["stop_id"] not in station_stop_ids or item["service_id"] not in active:
-                continue
-            scheduled = _parse_gtfs_time(item["departure_time"], service_date)
-            if scheduled >= now:
-                results.append({
-                    "route": item["route"],
-                    "destination": item["destination"],
-                    "stop_name": item["stop_name"],
-                    "scheduled_at": scheduled.isoformat(),
-                    "scheduled_time": scheduled.strftime("%H:%M"),
-                    "minutes_until": max(0, int((scheduled - now).total_seconds() / 60 + 0.999)),
-                })
-    results.sort(key=lambda item: item["scheduled_at"])
     return {
         "station": station,
         "stop_ids": station["stop_ids"],
-        "departures": results[:6],
-        "source": "RapidKL GTFS Static",
-        "realtime": False,
-        "estimate": False,
-        "fetched_at": feed["fetched_at"],
+        "departures": _live_station_departures(feed, station_id, now),
+        "source": "RapidKL GTFS-Realtime vehicle positions (estimated)",
+        "realtime": True,
+        "estimate": True,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
         "checked_at": now.isoformat(),
+        "max_position_age_seconds": GTFS_REALTIME_MAX_POSITION_AGE_SECONDS,
     }
 
 

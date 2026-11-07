@@ -5,10 +5,17 @@
 
 #if defined(ARDUINO_ARCH_ESP32)
 #ifndef SHT31_SDA_PIN
-#define SHT31_SDA_PIN 21
+#define SHT31_SDA_PIN 12
 #endif
 #ifndef SHT31_SCL_PIN
-#define SHT31_SCL_PIN 22
+#define SHT31_SCL_PIN 13
+#endif
+#else 
+#ifndef SHT31_SDA_PIN
+#define SHT31_SDA_PIN 4
+#endif
+#ifndef SHT31_SCL_PIN
+#define SHT31_SCL_PIN 5
 #endif
 #endif
 

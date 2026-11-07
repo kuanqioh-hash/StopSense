@@ -17,23 +17,35 @@ TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 def parse_reading(line: str, device_id: str = DEFAULT_DEVICE_ID) -> dict[str, object] | None:
     fields = line.strip().split(",")
-    if not fields or fields[0] != "SHT31":
+    if not fields or fields[0] not in {"SHT31", "STOPSENSE"}:
         return None
+
+    is_combined_reading = fields[0] == "STOPSENSE"
     if len(fields) == 3 and fields[1] == "ERROR":
         raise ValueError(f"Arduino sensor error: {fields[2]}")
-    if len(fields) != 3:
-        raise ValueError("Malformed SHT31 serial line")
+    expected_fields = 4 if is_combined_reading else 3
+    if len(fields) != expected_fields:
+        sensor_name = "StopSense" if is_combined_reading else "SHT31"
+        raise ValueError(f"Malformed {sensor_name} serial line")
 
     try:
         temperature_c = float(fields[1])
         humidity_pct = float(fields[2])
     except ValueError as error:
-        raise ValueError("SHT31 values must be numeric") from error
+        raise ValueError("Temperature and humidity values must be numeric") from error
 
     if not math.isfinite(temperature_c) or not -20 <= temperature_c <= 70:
         raise ValueError("Temperature is outside the API's accepted range (-20 to 70 °C)")
     if not math.isfinite(humidity_pct) or not 0 <= humidity_pct <= 100:
         raise ValueError("Humidity must be between 0 and 100 percent")
+
+    crowd_level = "Unknown"
+    if is_combined_reading:
+        crowd_levels = {"LOW": "Low", "MODERATE": "Moderate", "HIGH": "High", "UNKNOWN": "Unknown"}
+        try:
+            crowd_level = crowd_levels[fields[3].strip().upper()]
+        except KeyError as error:
+            raise ValueError("Crowd level must be Low, Moderate, High, or Unknown") from error
 
     return {
         "device_id": device_id,
@@ -43,7 +55,7 @@ def parse_reading(line: str, device_id: str = DEFAULT_DEVICE_ID) -> dict[str, ob
         "water_level_pct": None,
         "power_w": None,
         "cooler_on": None,
-        "crowd_level": "Unknown",
+        "crowd_level": crowd_level,
         "crowd_source": "sensor",
         "fault_code": None,
     }

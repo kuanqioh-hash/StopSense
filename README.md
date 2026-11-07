@@ -131,6 +131,43 @@ Replace the example port with the Uno's port shown in Arduino IDE (**Tools > Por
 
 For a hosted API, pass its full telemetry endpoint using `--api-url`, for example `https://your-api.example/telemetry`. The API must be reachable from the computer running the bridge, and the frontend must point at that same backend to display its readings. This demo API has no authentication; do not expose it publicly without adding authentication and deployment safeguards. The bridge sends temperature and humidity; water level, power, and cooler state are stored as `null` and shown as not reported, rather than fabricated.
 
+## Combined ESP32/Uno SHT31 + LD2410C dashboard telemetry
+
+`arduino/StopSenseESP32/StopSenseESP32.ino` combines the SHT31 temperature/humidity sensor with LD2410C presence detection and emits `STOPSENSE,<temperature C>,<humidity %>,<crowd level>` over USB serial every five seconds. On ESP32 it uses the LD2410C engineering-mode UART estimate: no target maps to `Low`, a target with fewer than six active distance gates maps to `Moderate`, and six or more active gates maps to `High`. On Uno it uses the sensor's digital `OUT` pin: `CLEAR` maps to `Low` and `PRESENT` maps to `High` (no `Moderate`). The bridge posts the crowd level with `crowd_source: sensor`. Neither method is a verified people count.
+
+Wire with power disconnected. **For ESP32:** connect SHT31 SDA/SCL to GPIO12/13 (matching the current `SHT31USB` ESP32 sketch), sensor GND to ESP32 GND, and sensor VCC only to a voltage supported by its breakout; ensure I2C pull-ups are 3.3 V, not 5 V. GPIO12 is a boot-strapping pin on classic ESP32 boards; if it prevents boot, use GPIO21/22 and change `SHT31_SDA_PIN` / `SHT31_SCL_PIN`. Connect LD2410C `UART_TX` to GPIO25 (UART RX), `UART_RX` to GPIO26 (UART TX), and share GND; power it from 5 V with adequate supply capacity. UART uses 256000 baud internally. **For Uno:** connect SHT31 SDA to A4 and SCL to A5, and connect LD2410C `OUT` to D2; share GND and power the radar from 5 V with adequate supply capacity. Leave the LD2410C UART pins disconnected. The board's built-in LED indicates radar `HIGH`/`PRESENT`; on ESP32 it uses the one-second HIGH stability filter, while on Uno it follows the digital presence output.
+
+In Arduino IDE, select either an ESP32 board or Uno and its USB port, install **Adafruit SHT31 Library**, then open and upload `arduino/StopSenseESP32/StopSenseESP32.ino`. The sketch selects the appropriate sensor path for the selected board. SHT31 read failures are reported and retried; missing/stale ESP32 radar data yields `Unknown`. The bridge accepts both this combined record and the legacy `SHT31` record. Close Serial Monitor before starting it. For the live dashboard, use the deployed backend endpoint:
+
+```bash
+python -m pip install -r requirements-arduino.txt
+python arduino_serial_bridge.py --port /dev/cu.usbserial-0001 --api-url https://CoolStop.onrender.com/telemetry --device-id stop-01
+```
+
+Replace the sample port with the board's USB port shown in Arduino IDE. Keep the computer and internet connection available while the bridge runs. The StopSense frontend must use that same backend URL to display incoming readings. The backend's public demo API has no authentication, so use only its intended demo deployment; do not expose a new API publicly without authentication and deployment safeguards.
+
+## Standalone LD2410C presence monitor
+
+`arduino/LD2410C/LD2410C.ino` is a separate test sketch for the LD2410C's digital `OUT` pin. It supports an Arduino Uno (default input pin D2) and a typical ESP32 DevKit (default GPIO27), prints `LD2410C,PRESENT` or `LD2410C,CLEAR` to the Serial Monitor at 115200 baud immediately and then every five seconds, and lights the board's built-in LED while presence is detected when that board defines `LED_BUILTIN`. It does not modify the SHT31 sketch, send data to the API/dashboard, or control fans/lights. Upload this sketch instead of the SHT31 sketch when testing the presence sensor.
+
+With the board powered off, connect LD2410C VCC to 5 V, GND to board GND, and `OUT` to the sketch's input pin (D2 on Uno or GPIO27 on ESP32). The sensor and board must share ground. Hi-Link's LD2410C manual specifies a 3.3 V `OUT` logic level, so it can connect directly to ESP32 GPIO27; if your particular breakout differs, verify its output voltage before wiring. Leave UART_TX/UART_RX disconnected for this simple digital-output monitor.
+
+In Arduino IDE, select the Uno or ESP32 board and its USB port, open `arduino/LD2410C/LD2410C.ino`, upload, then open Serial Monitor at 115200 baud. Move into and out of the sensor's detection area; the LED follows presence changes, and the current status is printed immediately and every five seconds. To use another input pin, change the board-specific `LD2410C_OUT_PIN` default near the top of the sketch. If your board's built-in LED is active-low, set `LD2410C_LED_ACTIVE_LOW` to `1`.
+
+### Set the LD2410C maximum range (ESP32 only)
+
+`arduino/LD2410C_SetRange/LD2410C_SetRange.ino` is a separate one-time ESP32 setup sketch. It sets both motion and stationary maximum distance gates to gate 2 (about 1.5 m) and preserves the existing no-presence delay. This is an approximate radial detection limit, not an exact perimeter; the sensor cannot define a polygon or reliably count individual people. Its smallest supported maximum-range setting is 1.5 m.
+
+With power disconnected, wire sensor `UART_TX` to ESP32 GPIO25 (UART RX), sensor `UART_RX` to ESP32 GPIO26 (UART TX), and connect sensor GND to ESP32 GND. Power the LD2410C from 5 V with adequate supply capacity; keep `OUT` wired as described above if you also want to monitor presence. In Arduino IDE, select an ESP32 board, open and upload the setup sketch, and check Serial Monitor at 115200 baud for a success message. The sketch communicates over UART at 256000 baud. If using other pins, define `LD2410C_UART_RX_PIN` and `LD2410C_UART_TX_PIN` before the defaults in the sketch.
+
+After a successful configuration, power off the sensor, disconnect the UART wires, then upload the standalone monitor sketch. The range setting is stored in the sensor. This configurator is ESP32-only because Uno does not provide a hardware UART suitable for the LD2410C's 256000-baud interface.
+
+### Experimental occupancy estimate (ESP32 only)
+
+`arduino/LD2410C_OccupancyEstimate/LD2410C_OccupancyEstimate.ino` reads engineering-mode UART data and prints `EMPTY`, `LOW`, or `HIGH` every five seconds. Its status LED lights for a `HIGH` state and turns off for `LOW`, `EMPTY`, or stale/missing data. To reduce flicker when gate counts fluctuate around the threshold, LED state changes only after the requested state stays stable for 1 second; stale/missing data turns it off immediately. The sketch uses `LED_BUILTIN` when available, otherwise GPIO2; override `LD2410C_STATUS_LED_PIN` if your ESP32 board uses a different LED pin, and set `LD2410C_LED_ACTIVE_LOW` to `1` for an active-low LED. Connect sensor `UART_TX` to ESP32 GPIO25 (UART RX), sensor `UART_RX` to ESP32 GPIO26 (UART TX), and share GND; the ESP32's USB Serial Monitor remains at 115200 baud while the sensor UART runs at 256000 baud. The sketch enables engineering mode at startup. To return to the usual output mode, power-cycle the sensor.
+
+This is only an experimental signal-level heuristic, not a people counter: it reports `EMPTY` when the sensor has no target, `LOW` for an active target with 1–5 distance gates at energy 20 or higher, and `HIGH` for 6 or more such gates. One person can activate many gates through movement and reflections, while several people can overlap, so these categories do not correspond to a number of people. Tune `ACTIVE_GATE_ENERGY_THRESHOLD` and `HIGH_GATE_COUNT` only through testing in your specific space; the Uno's digital `OUT`-only setup cannot provide the UART data this estimate needs.
+
 ## Shared ESP32/FastAPI payload
 
 The simulator and USB serial bridge send this schema to `POST /telemetry`. Firmware with network access (for example, an ESP32 program using Wi-Fi) can send the same JSON using HTTP POST with `Content-Type: application/json`; the shared SHT31 sketch in this project uses USB serial instead:

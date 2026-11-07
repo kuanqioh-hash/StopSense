@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { trackPeople } from '../src/counterTracking.js'
 
-const person = (centerY, score = 0.9, centerX = 120) => ({ class: 'person', score, bbox: [centerX - 20, centerY - 72, 40, 100] })
+const person = (centerY, score = 0.9, centerX = 120) => ({ class: 'person', score, bbox: [centerX - 20, centerY - 50, 40, 100] })
 const options = (now, overrides = {}) => ({
   now,
   orientation: 'horizontal',

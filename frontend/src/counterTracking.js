@@ -16,7 +16,7 @@ export function trackPeople(detections, tracks, nextTrackId, options) {
   const candidateMatches = []
   for (let detectionIndex = 0; detectionIndex < people.length; detectionIndex += 1) {
     const [x, y, boxWidth, boxHeight] = people[detectionIndex].bbox
-    const center = { x: x + boxWidth / 2, y: y + boxHeight * 0.72 }
+    const center = { x: x + boxWidth / 2, y: y + boxHeight / 2 }
     for (const track of tracks.values()) {
       if (now - track.lastSeen > 700) continue
       const elapsed = now - track.lastSeen
@@ -46,7 +46,7 @@ export function trackPeople(detections, tracks, nextTrackId, options) {
 
   for (const [detectionIndex, detection] of people.entries()) {
     const [x, y, boxWidth, boxHeight] = detection.bbox
-    const center = { x: x + boxWidth / 2, y: y + boxHeight * 0.72 }
+    const center = { x: x + boxWidth / 2, y: y + boxHeight / 2 }
     const coordinate = orientation === 'horizontal' ? center.y : center.x
     const matchedTrackId = matchedDetections.get(detectionIndex)
     const closest = matchedTrackId === undefined ? undefined : updatedTracks.get(matchedTrackId)

@@ -423,7 +423,8 @@ def _download_gtfs() -> dict[str, object]:
                         "sequence": int(row.get("stop_sequence") or 0),
                         "destination": trip.get("trip_headsign") or route.get("route_long_name", ""),
                         "service_id": trip["service_id"],
-                        "departure_time": row.get("departure_time") or row["arrival_time"],
+                        "arrival_time": row.get("arrival_time") or row.get("departure_time", ""),
+                        "departure_time": row.get("departure_time") or row.get("arrival_time", ""),
                     })
                 shapes: dict[str, list[dict[str, float]]] = {}
                 live_shape_ids = {trips[trip_id].get("shape_id", "") for trip_id in live_trip_ids}
@@ -621,6 +622,34 @@ def _live_station_departures(feed: dict[str, object], station_id: str, now: date
     return results[:6]
 
 
+def _scheduled_station_departures(feed: dict[str, object], station_id: str, now: datetime) -> list[dict[str, object]]:
+    station_stop_ids = set(GTFS_STATIONS[station_id]["stops"])
+    calendar = feed["calendar"]
+    calendar_dates = feed["calendar_dates"]
+    scheduled = []
+
+    for service_date in (now.date() - timedelta(days=1), now.date()):
+        active_services = _active_services(calendar, service_date, calendar_dates)
+        for item in feed["departures"]:
+            if item["stop_id"] not in station_stop_ids or item["service_id"] not in active_services:
+                continue
+            arrival_time = item.get("arrival_time") or item["departure_time"]
+            arrival_at = _parse_gtfs_time(arrival_time, service_date)
+            if arrival_at < now:
+                continue
+            scheduled.append({
+                "route": item["route"],
+                "destination": item["destination"],
+                "stop_name": item["stop_name"],
+                "scheduled_at": arrival_at.isoformat(),
+                "scheduled_time": arrival_at.strftime("%H:%M"),
+                "minutes_until": max(0, int((arrival_at - now).total_seconds() / 60)),
+            })
+
+    scheduled.sort(key=lambda item: item["scheduled_at"])
+    return scheduled[:6]
+
+
 @app.get("/transit/departures")
 def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> dict[str, object]:
     if station_id not in GTFS_STATIONS:
@@ -629,16 +658,33 @@ def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> 
     feed = _download_gtfs()
     now = datetime.now(GTFS_TIMEZONE)
     station = next(item for item in feed["stations"] if item["id"] == station_id)
+    try:
+        departures = _live_station_departures(feed, station_id, now)
+    except HTTPException:
+        departures = []
+
+    if departures:
+        return {
+            "station": station,
+            "stop_ids": station["stop_ids"],
+            "departures": departures,
+            "source": "RapidKL GTFS-Realtime vehicle positions (estimated)",
+            "realtime": True,
+            "estimate": True,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "checked_at": now.isoformat(),
+            "max_position_age_seconds": GTFS_REALTIME_MAX_POSITION_AGE_SECONDS,
+        }
+
     return {
         "station": station,
         "stop_ids": station["stop_ids"],
-        "departures": _live_station_departures(feed, station_id, now),
-        "source": "RapidKL GTFS-Realtime vehicle positions (estimated)",
-        "realtime": True,
-        "estimate": True,
+        "departures": _scheduled_station_departures(feed, station_id, now),
+        "source": "RapidKL GTFS Static schedule",
+        "realtime": False,
+        "estimate": False,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "checked_at": now.isoformat(),
-        "max_position_age_seconds": GTFS_REALTIME_MAX_POSITION_AGE_SECONDS,
     }
 
 

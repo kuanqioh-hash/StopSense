@@ -188,13 +188,15 @@ class RapidKlGtfsTests(unittest.TestCase):
         old_position.raise_for_status.return_value = None
         with patch.object(main.requests, "get", side_effect=[static_response, old_position]):
             result = main.transit_departures("subang-jaya")
-        self.assertEqual(result["departures"], [])
+        self.assertFalse(result["realtime"])
+        self.assertEqual(result["source"], "RapidKL GTFS Static schedule")
+        self.assertEqual(len(result["departures"]), 2)
 
         main._gtfs_realtime_cache.update({"expires_at": 0.0, "data": None})
         with patch.object(main.requests, "get", side_effect=main.requests.RequestException("feed unavailable")):
-            with self.assertRaises(HTTPException) as error:
-                main.transit_departures("subang-jaya")
-        self.assertEqual(error.exception.status_code, 503)
+            result = main.transit_departures("subang-jaya")
+        self.assertFalse(result["realtime"])
+        self.assertEqual(len(result["departures"]), 2)
 
     def _vehicle_feed(self, *, latitude=3.04, longitude=101.59, trip_id="trip2", bearing=0, speed=5, timestamp=None):
         message = main.gtfs_realtime_pb2.FeedMessage()
@@ -244,7 +246,7 @@ class RapidKlGtfsTests(unittest.TestCase):
         self.assertEqual(len(result["departures"]), 1)
         self.assertTrue(result["departures"][0]["stale_position"])
 
-    def test_usj7_does_not_substitute_schedule_when_no_live_vehicle_exists(self):
+    def test_usj7_falls_back_to_upcoming_static_schedule_without_live_vehicle(self):
         static_response = Mock(content=self.zip_bytes)
         static_response.raise_for_status.return_value = None
         empty_feed = main.gtfs_realtime_pb2.FeedMessage()
@@ -256,7 +258,37 @@ class RapidKlGtfsTests(unittest.TestCase):
         self.addCleanup(cache_patch.stop)
         with patch.object(main.requests, "get", side_effect=[static_response, live_response]):
             result = main.transit_departures("usj7")
-        self.assertEqual(result["departures"], [])
+        self.assertFalse(result["realtime"])
+        self.assertFalse(result["estimate"])
+        self.assertEqual(result["source"], "RapidKL GTFS Static schedule")
+        self.assertEqual(len(result["departures"]), 1)
+        self.assertEqual(result["departures"][0]["route"], "770")
+        self.assertIn("scheduled_at", result["departures"][0])
+        self.assertNotIn("arrival_at", result["departures"][0])
+
+    def test_schedule_fallback_is_used_when_live_feed_is_unavailable(self):
+        static_response = Mock(content=self.zip_bytes)
+        static_response.raise_for_status.return_value = None
+        cache_patch = patch.object(main, "_gtfs_realtime_cache", {"expires_at": 0.0, "data": None})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
+        with patch.object(main.requests, "get", side_effect=[static_response, main.requests.RequestException("feed unavailable")]):
+            result = main.transit_departures("usj7")
+        self.assertFalse(result["realtime"])
+        self.assertEqual(len(result["departures"]), 1)
+
+    def test_schedule_fallback_respects_service_calendar_and_day_boundary(self):
+        feed = {
+            "departures": [
+                {"stop_id": "1006526", "service_id": "daily", "arrival_time": "25:10:00", "departure_time": "25:10:00", "route": "770", "destination": "HAB PASAR SENI", "stop_name": "SJ693"},
+            ],
+            "calendar": [self.calendar],
+            "calendar_dates": [],
+        }
+        now = datetime.combine(self.service_date + timedelta(days=1), datetime.min.time(), main.GTFS_TIMEZONE) + timedelta(minutes=20)
+        departures = main._scheduled_station_departures(feed, "usj7", now)
+        self.assertEqual(len(departures), 1)
+        self.assertEqual(departures[0]["scheduled_at"], (now.replace(hour=1, minute=10)).isoformat())
 
     def test_unknown_station_is_rejected(self):
         with self.assertRaises(HTTPException) as error:

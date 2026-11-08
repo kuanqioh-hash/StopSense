@@ -55,7 +55,7 @@ export function TargetedAdvertisements({ stopId, route, crowdLevel, temperatureC
     <div className="targeted-ad-heading"><div><span className="card-kicker">LOCAL PICKS · CONTEXTUAL ADS</span><h2>{screen ? 'Around this stop' : 'Relevant nearby offers'}</h2></div><span className="simulated-tag">{context ? `WITHIN ${context.radius_m} M` : 'DEMO'}</span></div>
     {error && <p className="ad-status" role="status">{error}. Existing campaign data may be unavailable.</p>}
     {items.length ? <div className="targeted-ad-list">{items.slice(0, screen ? 2 : 3).map((ad) => <article className="targeted-ad-item" key={ad.id}>
-      <span className="targeted-ad-mark" aria-hidden="true">✦</span><div><small>{ad.advertiser} · SPONSORED</small><strong>{ad.title}</strong><p>{ad.detail}</p>{ad.match_reasons?.length ? <small className="ad-match-reasons">Matched: {ad.match_reasons.join(' · ')}</small> : null}</div>
+      <span className="targeted-ad-mark" aria-hidden="true">✦</span><div><small>{ad.advertiser} · SPONSORED</small><strong>{ad.title}</strong><p>{ad.detail}</p>{ad.match_reasons?.length && !ad.match_reasons.includes('General fallback; no contextual match') ? <small className="ad-match-reasons">Matched: {ad.match_reasons.join(' · ')}</small> : null}</div>
     </article>)}</div> : !error ? <p className="ad-status">No active campaign matches this stop and current conditions yet.</p> : null}
     {context && <small className="ad-data-note">Uses dashboard crowd/temperature, route, local time, editable nearby-facility tags and aggregate camera-count patterns. {context.traffic_source}; traffic fit {Math.round(context.traffic_score * 100)}%. Estimates only.</small>}
     {!screen && <AdvertiserInquiryForm />}

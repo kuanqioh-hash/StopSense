@@ -97,7 +97,13 @@ def rank_advertisements(
         ranked.append({**ad, "relevance_score": score, "match_reasons": reasons})
 
     ranked.sort(key=lambda ad: (-ad["relevance_score"], ad.get("id", 0)))
-    return ranked
+    if ranked:
+        return ranked
+
+    available = sorted((ad for ad in advertisements if ad.get("active", True)), key=lambda ad: ad.get("id", 0))
+    if not available:
+        return []
+    return [{**available[0], "relevance_score": 0, "match_reasons": ["General fallback; no contextual match"]}]
 
 
 def parse_local_datetime(value: str, timezone: Any) -> datetime:

@@ -36,6 +36,22 @@ class AdvertisementTests(unittest.TestCase):
         self.assertEqual(time_slot_for_hour(7), "breakfast")
         self.assertEqual(time_slot_for_hour(20), "evening")
 
+    def test_falls_back_to_an_active_ad_when_no_context_matches(self):
+        ads = [
+            {"id": 1, "title": "Paused", "active": False},
+            {"id": 2, "title": "Other stop", "active": True, "stop_ids": ["another-stop"]},
+            {"id": 3, "title": "Later ad", "active": True, "routes": ["different-route"]},
+        ]
+        result = rank_advertisements(ads, stop_id="stop-1", facilities=[], route=None,
+                                     crowd_level="Low", temperature_c=None, hour=2, traffic_score=0)
+        self.assertEqual([ad["title"] for ad in result], ["Other stop"])
+        self.assertEqual(result[0]["match_reasons"], ["General fallback; no contextual match"])
+
+    def test_empty_or_inactive_campaigns_do_not_create_a_fallback(self):
+        result = rank_advertisements([{"id": 1, "active": False}], stop_id="stop-1", facilities=[],
+                                     route=None, crowd_level="Low", temperature_c=None, hour=2, traffic_score=0)
+        self.assertEqual(result, [])
+
     def test_advertisement_crud_and_recommendation_with_profile_facilities(self):
         ad = main.Advertisement(advertiser="Local Cafe", title="Warm lunch", detail="A nearby lunch offer.",
                                 stop_ids=["stop-1"], facility_tags=["cafe"], crowd_levels=["High"], time_slots=["all-day"])

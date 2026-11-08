@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import LiveCameraCounter from './LiveCameraCounter'
-import { EhailingCompare, getOfferLinkDetails, ScreenSampleAd, ShopOfferCard } from './MobilityExtras'
+import { EhailingCompare, getOfferLinkDetails } from './MobilityExtras'
+import { AdvertisementOperations, TargetedAdvertisements } from './AdvertisementFeatures'
 
 type CrowdLevel = 'Low' | 'Moderate' | 'High' | 'Unknown'
 type Reading = {
@@ -318,7 +319,7 @@ function App() {
             </div>
             {transitError && <div className="notice-error" role="status">RapidKL transit data unavailable: {transitError}. Check that the backend can reach the official feed.</div>}
             {view === 'passenger' && <PassengerView reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} error={transitError} now={now} estimated buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} report={passengerCounts.filter((report) => report.bus_route === selectedBusRoute).sort((a, b) => b.observed_at.localeCompare(a.observed_at))[0]} />}
-            {view === 'screen' && <StopScreen reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} estimated />}
+            {view === 'screen' && <StopScreen reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} estimated route={selectedBusRoute} />}
             {view === 'operations' && <OperationsView readings={latest} reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} estimated />}
             {view !== 'screen' && <SolarGeneration />}
             {view === 'operations' && <PassengerFlow reports={passengerCounts} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} />}
@@ -391,7 +392,7 @@ function PassengerView({ reading, departures, stationName, loading, error, now, 
         {report && report.occupancy_count !== null ? <div className="bus-crowd-reading"><strong>{report.occupancy_count} estimated onboard</strong><span>{report.status === 'ok' ? 'Latest counter report' : `Counter ${report.status}`} · updated {formatTimestamp(report.observed_at)}</span></div> : <div className="bus-crowd-reading bus-crowd-inactive"><strong>Unavailable</strong><span>No doorway counter report is associated with this route yet.</span></div>}
         <small className="bus-crowd-note">This estimates occupancy from the counter's starting count and observed doorway crossings. It does not count everyone waiting at the stop or account for people already onboard unless initialized.</small>
       </article>
-      <ShopOfferCard stopId={reading.device_id} />
+      <TargetedAdvertisements stopId={reading.device_id} route={selectedBusRoute} crowdLevel={reading.crowd_level} temperatureC={reading.temperature_c} />
       <EhailingCompare stopId={reading.device_id} />
     </section>
   )
@@ -439,7 +440,7 @@ function PassengerFlow({ reports, buses, selectedBusRoute, onBusChange }: { repo
   )
 }
 
-function StopScreen({ reading, departures, stationName, loading, now, estimated }: { reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number; estimated: boolean }) {
+function StopScreen({ reading, departures, stationName, loading, now, estimated, route }: { reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number; estimated: boolean; route: string }) {
   const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(transitTimestamp(departure)).getTime() - now) / 60000))
   return (
     <section className="screen-wrap">
@@ -470,7 +471,7 @@ function StopScreen({ reading, departures, stationName, loading, now, estimated 
             <small className="screen-energy-note">kWh/day · illustrative reference values. Display wattage not separately specified.</small>
         </section>
         <div className="screen-info"><span><i className="screen-sun">☀</i> {reading.temperature_c.toFixed(1)}°C <small>Temperature</small></span><span><i className="screen-humidity">≈</i> {Math.round(reading.humidity_pct)}% <small>Humidity</small></span><span><i className="screen-crowd">♙</i> {reading.crowd_level} <small>Waiting crowd</small></span></div>
-        <ScreenSampleAd stopId={reading.device_id} />
+        <TargetedAdvertisements stopId={reading.device_id} route={route} crowdLevel={reading.crowd_level} temperatureC={reading.temperature_c} screen />
         <div className="screen-footer">{estimated ? 'GPS-based arrival estimates · Not official predictions' : 'Scheduled departures from RapidKL GTFS · Actual arrivals may differ'} · Scan an ad QR to continue on your phone</div>
       </div>
       <div className="screen-notes"><span className="screen-note-icon">▣</span><div><strong>Designed for a quick glance</strong><p>{estimated ? 'USJ 7 estimates use live vehicle positions and route geometry; they are not official trip predictions.' : 'Scheduled departures are sourced from RapidKL static GTFS; actual bus arrival times may differ.'}</p></div></div>
@@ -497,6 +498,7 @@ function OperationsView({ readings, reading, departures, stationName, loading, n
         <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">DEVICE HEALTH</span><h3>{reading.device_id}</h3></div><span className="device-dot"><i /> Online</span></div><div className="health-row"><span>Waiting-area crowd</span><strong>{reading.crowd_level}</strong></div><div className="health-row"><span>Crowd data source</span><strong>{reading.crowd_source}</strong></div><div className="health-row"><span>Last sensor update</span><strong>{formatTimestamp(reading.timestamp)}</strong></div><div className="health-row"><span>Cooler state</span><strong>{reading.cooler_on === null ? 'Not reported' : reading.cooler_on ? 'On' : 'Off'}</strong></div></article>
       </div>
       <div className="site-summary"><div><strong>{readings.length}</strong><span>stops reporting</span></div><div><strong>{readings.filter((item) => item.cooler_on).length}</strong><span>coolers running</span></div><div><strong>{readings.filter((item) => Boolean(item.fault_code)).length}</strong><span>faults reported</span></div><small>Live server-pushed telemetry · Demonstration values only</small></div>
+      <AdvertisementOperations currentStopId={reading.device_id} />
     </section>
   )
 }

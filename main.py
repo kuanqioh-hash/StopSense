@@ -15,13 +15,15 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import requests
+
+from ad_engine import rank_advertisements, time_slot_for_hour
 from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 DB_PATH = Path(os.environ.get("TELEMETRY_DB", "telemetry.db"))
 GTFS_STATIC_URL = os.environ.get(
@@ -66,7 +68,7 @@ app.add_middleware(
         "https://localhost",
         "capacitor://localhost",
     ],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -116,6 +118,52 @@ class PassengerCount(BaseModel):
     occupancy_count: int | None = Field(default=None, ge=0)
     confidence: float = Field(ge=0, le=1)
     status: Literal["ok", "degraded", "offline", "error"]
+
+
+class Advertisement(BaseModel):
+    advertiser: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=140)
+    detail: str = Field(min_length=1, max_length=500)
+    active: bool = True
+    stop_ids: list[str] = Field(default_factory=list, max_length=100)
+    facility_tags: list[str] = Field(default_factory=list, max_length=30)
+    routes: list[str] = Field(default_factory=list, max_length=50)
+    crowd_levels: list[Literal["Low", "Moderate", "High"]] = Field(default_factory=list)
+    time_slots: list[Literal["breakfast", "lunch", "commute", "evening", "all-day"]] = Field(default_factory=list)
+    min_temperature_c: float | None = Field(default=None, ge=-20, le=70)
+    max_temperature_c: float | None = Field(default=None, ge=-20, le=70)
+    busy_only: bool = False
+
+    @model_validator(mode="after")
+    def validate_temperature_range(self):
+        if self.min_temperature_c is not None and self.max_temperature_c is not None and self.min_temperature_c > self.max_temperature_c:
+            raise ValueError("minimum temperature must not exceed maximum temperature")
+        return self
+
+
+class AdvertisementInquiry(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=3, max_length=254)
+    organization: str | None = Field(default=None, max_length=120)
+    message: str = Field(min_length=10, max_length=2000)
+
+
+class InquiryStatus(BaseModel):
+    status: Literal["new", "contacted", "closed"]
+
+
+class StopAdProfile(BaseModel):
+    stop_id: str = Field(min_length=1, max_length=64)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    radius_m: int = Field(default=500, ge=50, le=5000)
+    facilities: list[str] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_coordinates(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("latitude and longitude must be set together")
+        return self
 
 
 def connect_db() -> sqlite3.Connection:
@@ -210,6 +258,69 @@ def initialize_db() -> None:
                 status TEXT NOT NULL CHECK (status IN ('ok', 'degraded', 'offline', 'error'))
             )"""
         )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS advertisements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                advertiser TEXT NOT NULL,
+                title TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                stop_ids TEXT NOT NULL DEFAULT '[]',
+                facility_tags TEXT NOT NULL DEFAULT '[]',
+                routes TEXT NOT NULL DEFAULT '[]',
+                crowd_levels TEXT NOT NULL DEFAULT '[]',
+                time_slots TEXT NOT NULL DEFAULT '[]',
+                min_temperature_c REAL,
+                max_temperature_c REAL,
+                busy_only INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS advertiser_inquiries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                organization TEXT,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'contacted', 'closed')),
+                created_at TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS stop_ad_profiles (
+                stop_id TEXT PRIMARY KEY,
+                latitude REAL,
+                longitude REAL,
+                radius_m INTEGER NOT NULL DEFAULT 500,
+                facilities TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS traffic_by_route_hour (
+                route TEXT NOT NULL,
+                hour INTEGER NOT NULL CHECK (hour BETWEEN 0 AND 23),
+                passenger_events INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (route, hour)
+            )"""
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_inquiries_created ON advertiser_inquiries(created_at DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_ads_active ON advertisements(active)")
+        if connection.execute("SELECT COUNT(*) FROM advertisements").fetchone()[0] == 0:
+            now = datetime.now(timezone.utc).isoformat()
+            sample_ads = [
+                ("StopSense Demo", "Beat the queue", "Try nearby public-transport alternatives while this stop is busy.", 1, "[]", "[]", "[]", '["High"]', '["all-day"]', None, None, 0, now),
+                ("StopSense Demo", "A lunch break nearby", "Discover food and drink offers around your stop at lunchtime.", 1, "[]", '["food", "cafe"]', "[]", "[]", '["lunch"]', None, None, 0, now),
+                ("StopSense Demo", "Stay cool on your commute", "Find a refreshing nearby offer on a warm day.", 1, "[]", '["food", "retail"]', "[]", "[]", '["commute", "evening"]', 30, None, 0, now),
+            ]
+            connection.executemany(
+                """INSERT INTO advertisements (
+                    advertiser, title, detail, active, stop_ids, facility_tags, routes,
+                    crowd_levels, time_slots, min_temperature_c, max_temperature_c, busy_only, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sample_ads,
+            )
         connection.commit()
 
 
@@ -624,6 +735,10 @@ def receive_passenger_count(count: PassengerCount) -> dict[str, object]:
     payload["observed_at"] = observed_at.astimezone(timezone.utc).isoformat()
 
     with closing(connect_db()) as connection:
+        previous = connection.execute(
+            "SELECT bus_route, boarding_count, alighting_count FROM passenger_counts WHERE camera_id = ?",
+            (payload["camera_id"],),
+        ).fetchone()
         connection.execute(
             """INSERT INTO passenger_counts (
                    camera_id, bus_route, observed_at, boarding_count, alighting_count,
@@ -648,6 +763,20 @@ def receive_passenger_count(count: PassengerCount) -> dict[str, object]:
                 payload["status"],
             ),
         )
+        route = payload["bus_route"]
+        if route and payload["status"] in ("ok", "degraded"):
+            old_boarding = previous["boarding_count"] if previous and previous["bus_route"] == route else 0
+            old_alighting = previous["alighting_count"] if previous and previous["bus_route"] == route else 0
+            event_count = max(0, payload["boarding_count"] - old_boarding) + max(0, payload["alighting_count"] - old_alighting)
+            if event_count:
+                local_hour = observed_at.astimezone(GTFS_TIMEZONE).hour
+                connection.execute(
+                    """INSERT INTO traffic_by_route_hour (route, hour, passenger_events)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(route, hour) DO UPDATE SET
+                       passenger_events = passenger_events + excluded.passenger_events""",
+                    (route, local_hour, event_count),
+                )
         connection.commit()
     publish_telemetry_update()
     return {"ok": True, "camera_id": payload["camera_id"]}
@@ -668,3 +797,185 @@ def list_passenger_counts(
     with closing(connect_db()) as connection:
         rows = connection.execute(sql, params).fetchall()
     return {"items": [dict(row) for row in rows]}
+
+
+def _decode_advertisement(row: sqlite3.Row) -> dict[str, object]:
+    item = dict(row)
+    for field in ("stop_ids", "facility_tags", "routes", "crowd_levels", "time_slots"):
+        item[field] = json.loads(item[field])
+    item["active"] = bool(item["active"])
+    item["busy_only"] = bool(item["busy_only"])
+    return item
+
+
+def _advertisement_values(ad: Advertisement) -> tuple[object, ...]:
+    payload = ad.model_dump()
+    return (
+        payload["advertiser"].strip(), payload["title"].strip(), payload["detail"].strip(),
+        int(payload["active"]), json.dumps(payload["stop_ids"]),
+        json.dumps(payload["facility_tags"]), json.dumps(payload["routes"]),
+        json.dumps(payload["crowd_levels"]), json.dumps(payload["time_slots"]),
+        payload["min_temperature_c"], payload["max_temperature_c"],
+        int(payload["busy_only"]), datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/advertisements/recommendations")
+def advertisement_recommendations(
+    stop_id: str = Query(min_length=1, max_length=64),
+    route: str | None = Query(default=None, max_length=32),
+    crowd_level: Literal["Low", "Moderate", "High", "Unknown"] = "Unknown",
+    temperature_c: float | None = Query(default=None, ge=-20, le=70),
+) -> dict[str, object]:
+    with closing(connect_db()) as connection:
+        profile_row = connection.execute("SELECT * FROM stop_ad_profiles WHERE stop_id = ?", (stop_id,)).fetchone()
+        profile = dict(profile_row) if profile_row else {"stop_id": stop_id, "facilities": "[]", "radius_m": 500, "latitude": None, "longitude": None}
+        sensor = connection.execute(
+            "SELECT crowd_level, temperature_c, timestamp FROM telemetry WHERE device_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
+            (stop_id,),
+        ).fetchone()
+        if sensor:
+            try:
+                sensor_time = datetime.fromisoformat(sensor["timestamp"].replace("Z", "+00:00"))
+                if sensor_time.tzinfo is None:
+                    sensor_time = sensor_time.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - sensor_time.astimezone(timezone.utc)).total_seconds() < 1800:
+                    if crowd_level == "Unknown" and sensor["crowd_level"] != "Unknown":
+                        crowd_level = sensor["crowd_level"]
+                    if temperature_c is None:
+                        temperature_c = sensor["temperature_c"]
+            except ValueError:
+                pass
+        if route:
+            traffic_rows = connection.execute("SELECT hour, passenger_events FROM traffic_by_route_hour WHERE route = ?", (route,)).fetchall()
+        else:
+            traffic_rows = connection.execute("SELECT hour, SUM(passenger_events) AS passenger_events FROM traffic_by_route_hour GROUP BY hour").fetchall()
+        ads = [_decode_advertisement(row) for row in connection.execute("SELECT * FROM advertisements WHERE active = 1")]
+    facilities = json.loads(profile["facilities"])
+    now = datetime.now(GTFS_TIMEZONE)
+    traffic_by_hour = {row["hour"]: row["passenger_events"] for row in traffic_rows}
+    maximum = max(traffic_by_hour.values(), default=0)
+    traffic_score = (traffic_by_hour.get(now.hour, 0) / maximum) if maximum else 0.0
+    ranked = rank_advertisements(
+        ads, stop_id=stop_id, facilities=facilities, route=route,
+        crowd_level=crowd_level, temperature_c=temperature_c, hour=now.hour,
+        traffic_score=traffic_score,
+    )
+    return {
+        "items": ranked,
+        "context": {"stop_id": stop_id, "radius_m": profile["radius_m"], "facilities": facilities,
+                    "route": route, "crowd_level": crowd_level, "temperature_c": temperature_c,
+                    "time_slot": time_slot_for_hour(now.hour), "traffic_score": round(traffic_score, 3),
+                    "traffic_source": "accumulated camera passenger-count changes; estimates only"},
+    }
+
+
+@app.get("/advertisements")
+def list_advertisements() -> dict[str, list[dict[str, object]]]:
+    with closing(connect_db()) as connection:
+        rows = connection.execute("SELECT * FROM advertisements ORDER BY id").fetchall()
+    return {"items": [_decode_advertisement(row) for row in rows]}
+
+
+@app.post("/advertisements", status_code=201)
+def create_advertisement(ad: Advertisement) -> dict[str, object]:
+    values = _advertisement_values(ad)
+    with closing(connect_db()) as connection:
+        cursor = connection.execute(
+            """INSERT INTO advertisements (
+                advertiser, title, detail, active, stop_ids, facility_tags, routes,
+                crowd_levels, time_slots, min_temperature_c, max_temperature_c, busy_only, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", values,
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM advertisements WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return _decode_advertisement(row)
+
+
+@app.put("/advertisements/{advertisement_id}")
+def update_advertisement(advertisement_id: int, ad: Advertisement) -> dict[str, object]:
+    values = _advertisement_values(ad)
+    with closing(connect_db()) as connection:
+        cursor = connection.execute(
+            """UPDATE advertisements SET advertiser=?, title=?, detail=?, active=?, stop_ids=?, facility_tags=?,
+                routes=?, crowd_levels=?, time_slots=?, min_temperature_c=?, max_temperature_c=?, busy_only=?, updated_at=?
+                WHERE id=?""", (*values, advertisement_id),
+        )
+        if not cursor.rowcount:
+            raise HTTPException(status_code=404, detail="Advertisement not found")
+        connection.commit()
+        row = connection.execute("SELECT * FROM advertisements WHERE id = ?", (advertisement_id,)).fetchone()
+    return _decode_advertisement(row)
+
+
+@app.delete("/advertisements/{advertisement_id}", status_code=204)
+def delete_advertisement(advertisement_id: int) -> None:
+    with closing(connect_db()) as connection:
+        cursor = connection.execute("DELETE FROM advertisements WHERE id = ?", (advertisement_id,))
+        if not cursor.rowcount:
+            raise HTTPException(status_code=404, detail="Advertisement not found")
+        connection.commit()
+
+
+@app.post("/advertisement-inquiries", status_code=201)
+def create_advertisement_inquiry(inquiry: AdvertisementInquiry) -> dict[str, object]:
+    email = inquiry.email.strip()
+    if "@" not in email or email.startswith("@") or email.endswith("@") or "." not in email.rsplit("@", 1)[-1]:
+        raise HTTPException(status_code=422, detail="Enter a valid email address")
+    with closing(connect_db()) as connection:
+        cursor = connection.execute(
+            """INSERT INTO advertiser_inquiries (name, email, organization, message, status, created_at)
+               VALUES (?, ?, ?, ?, 'new', ?)""",
+            (inquiry.name.strip(), email, inquiry.organization.strip() if inquiry.organization else None,
+             inquiry.message.strip(), datetime.now(timezone.utc).isoformat()),
+        )
+        connection.commit()
+    return {"ok": True, "id": cursor.lastrowid}
+
+
+@app.get("/advertisement-inquiries")
+def list_advertisement_inquiries() -> dict[str, list[dict[str, object]]]:
+    with closing(connect_db()) as connection:
+        rows = connection.execute("SELECT * FROM advertiser_inquiries ORDER BY created_at DESC, id DESC").fetchall()
+    return {"items": [dict(row) for row in rows]}
+
+
+@app.patch("/advertisement-inquiries/{inquiry_id}")
+def update_advertisement_inquiry(inquiry_id: int, update: InquiryStatus) -> dict[str, object]:
+    with closing(connect_db()) as connection:
+        cursor = connection.execute("UPDATE advertiser_inquiries SET status = ? WHERE id = ?", (update.status, inquiry_id))
+        if not cursor.rowcount:
+            raise HTTPException(status_code=404, detail="Inquiry not found")
+        connection.commit()
+        row = connection.execute("SELECT * FROM advertiser_inquiries WHERE id = ?", (inquiry_id,)).fetchone()
+    return dict(row)
+
+
+@app.get("/stop-ad-profiles")
+def list_stop_ad_profiles() -> dict[str, list[dict[str, object]]]:
+    with closing(connect_db()) as connection:
+        rows = connection.execute("SELECT * FROM stop_ad_profiles ORDER BY stop_id").fetchall()
+    items = [dict(row) for row in rows]
+    for item in items:
+        item["facilities"] = json.loads(item["facilities"])
+    return {"items": items}
+
+
+@app.put("/stop-ad-profiles/{stop_id}")
+def save_stop_ad_profile(stop_id: str, profile: StopAdProfile) -> dict[str, object]:
+    if stop_id != profile.stop_id:
+        raise HTTPException(status_code=422, detail="Path stop_id must match profile stop_id")
+    with closing(connect_db()) as connection:
+        connection.execute(
+            """INSERT INTO stop_ad_profiles (stop_id, latitude, longitude, radius_m, facilities, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(stop_id) DO UPDATE SET latitude=excluded.latitude, longitude=excluded.longitude,
+                 radius_m=excluded.radius_m, facilities=excluded.facilities, updated_at=excluded.updated_at""",
+            (profile.stop_id, profile.latitude, profile.longitude, profile.radius_m,
+             json.dumps([tag.strip() for tag in profile.facilities if tag.strip()][:50]), datetime.now(timezone.utc).isoformat()),
+        )
+        connection.commit()
+        row = connection.execute("SELECT * FROM stop_ad_profiles WHERE stop_id = ?", (stop_id,)).fetchone()
+    item = dict(row)
+    item["facilities"] = json.loads(item["facilities"])
+    return item

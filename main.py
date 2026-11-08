@@ -25,7 +25,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
-DB_PATH = Path(os.environ.get("TELEMETRY_DB", "telemetry.db"))
+DB_PATH = Path(
+    os.environ.get(
+        "TELEMETRY_DB",
+        "/tmp/telemetry.db" if os.environ.get("VERCEL") else "telemetry.db",
+    )
+)
 GTFS_STATIC_URL = os.environ.get(
     "GTFS_STATIC_URL",
     "https://api.data.gov.my/gtfs-static/prasarana?category=rapid-bus-kl",

@@ -6,7 +6,7 @@ A local prototype with a **React + TypeScript frontend**, FastAPI telemetry API,
 Python simulator → FastAPI /telemetry → SQLite → React + TypeScript (Vite)
 ```
 
-Device readings are synthetic unless you connect a sensor. Arrivals at USJ 7, LRT Subang Jaya, and LRT Putra Heights are estimated from live RapidKL GTFS-Realtime vehicle positions. These are not official stop-level predictions; a clearly labeled last-known position may be used for up to 10 minutes. The API has no authentication and is intended for local demonstration only; do not expose it to the public internet.
+Device readings are synthetic unless you connect a sensor. Arrivals at USJ 7, LRT Subang Jaya, and LRT Putra Heights are estimated from live RapidKL GTFS-Realtime vehicle positions. These are not official stop-level predictions; a clearly labeled last-known position may be used for up to 10 minutes. The API has no authentication. Its Vercel setup is for public demos with synthetic/sample data only; never use it for real operational data or advertiser contact details.
 
 ## Requirements
 
@@ -67,7 +67,13 @@ npm run build
 npm run preview
 ```
 
-The development proxy only applies to `npm run dev`. Production builds read `VITE_API_URL` from `frontend/.env.production`, currently set to `https://CoolStop.onrender.com`; changing it requires rebuilding and redeploying the static site. The FastAPI app allows browser requests from `https://qiphy.github.io` and the Capacitor Android/iOS origins; this is CORS configuration, not authentication. Deploy the updated backend as well as the frontend so the CORS configuration takes effect.
+The development proxy only applies to `npm run dev`. Production builds read `VITE_API_URL` from `frontend/.env.production`, currently set to `https://CoolStop.onrender.com`; changing it requires rebuilding and redeploying the static site. The Vercel frontend service overrides this value at build time to use its same-domain `/api` route, without changing the existing GitHub Pages/mobile build setting. The FastAPI app allows browser requests from `https://qiphy.github.io` and the Capacitor Android/iOS origins; this is CORS configuration, not authentication. Deploy the updated backend as well as the frontend so the CORS configuration takes effect.
+
+### Vercel multi-service demo
+
+`vercel.json` configures two services: `frontend` (Vite, public at `/`) and `app` (FastAPI, public under `/api`). Import the repository with the project root set to `.`. The API rewrite sends `/api/*` to FastAPI, where a request-path transform removes the `/api` prefix to match the existing root-level routes. The frontend build sets `VITE_API_URL=/api`. There are no service bindings because the browser calls the API through the public same-domain route; no server-side service calls exist.
+
+This is only a demo deployment. Every API endpoint is public and unauthenticated, including operations and advertiser-inquiry management. Vercel's function filesystem is temporary, so the API uses `/tmp/telemetry.db`; data may disappear or differ across function instances, and the in-process live telemetry stream is not a durable cross-instance channel. Do not enter real advertiser contact details or rely on this deployment for persistent sensor/operations data. Use authenticated endpoints and a durable database before production use.
 
 ### Android and iOS apps
 
@@ -90,7 +96,7 @@ The APK is written to `frontend/android/app/build/outputs/apk/debug/app-debug.ap
 
 For iOS, use a Mac with Xcode. Open the synced project with `npm run ios:open`, select your Apple development team and signing settings, then use Xcode's **Product > Archive** workflow to export an IPA. A valid Apple signing identity and provisioning profile are required to install or distribute an iPhone build; those are not included in this repository.
 
-Camera use is declared in both native projects. Validate camera permission prompts, the TensorFlow.js person detector, and the live API connection on real devices. Capacitor's Android and iOS origins are allowed by the local FastAPI CORS configuration; deploy that backend change before testing against the hosted API. The backend currently has no authentication and is a demonstration service, so do not publish it for public use without adding authentication and other production safeguards.
+Camera use is declared in both native projects. Validate camera permission prompts, the TensorFlow.js person detector, and the live API connection on real devices. Capacitor's Android and iOS origins are allowed by the local FastAPI CORS configuration; deploy that backend change before testing against the hosted API. The backend has no authentication and is suitable only for synthetic/demo data on a public host; add authentication and other production safeguards before handling real data.
 
 ### Contextual advertising prototype
 
@@ -98,7 +104,7 @@ Passenger and bus-stop-screen views request campaign recommendations from `GET /
 
 API operations include `GET/POST /advertisements`, `PUT/DELETE /advertisements/{id}`, `GET /stop-ad-profiles`, `PUT /stop-ad-profiles/{stop_id}`, `POST /advertisement-inquiries`, `GET /advertisement-inquiries`, and `PATCH /advertisement-inquiries/{id}`. The database is initialized with clearly labeled demo campaigns when it has none.
 
-**Security and privacy:** the existing demo API has no authentication. The Operations view is only hidden by client-side sample-account selection, and the management endpoints (including inquiry records and email addresses) are publicly accessible wherever the API is exposed. This is strictly a local/prototype feature: do not deploy it publicly or collect real advertiser contact details until server-side authentication, authorization, abuse protection, and privacy controls are implemented. Deploy the updated backend and frontend together to use the feature.
+**Security and privacy:** the demo API has no authentication. The Operations view is only hidden by client-side sample-account selection, and the management endpoints (including inquiry records and email addresses) are publicly accessible wherever the API is exposed. The Vercel configuration exposes these endpoints for demo data only. Do not collect real advertiser contact details or operational data until server-side authentication, authorization, abuse protection, privacy controls, and durable storage are implemented. Deploy the updated backend and frontend together to use the feature.
 
 ### Solar generation and reference energy use
 

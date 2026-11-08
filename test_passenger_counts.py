@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 import main
@@ -50,6 +51,12 @@ class PassengerCountApiTests(unittest.TestCase):
         self.assertNotIn("crowd_level", listing[0])
         routes = [route for route in main.app.routes if route.path == "/passenger-counts"]
         self.assertEqual({method for route in routes for method in route.methods}, {"GET", "POST"})
+
+    def test_vercel_api_prefix_routes_to_unprefixed_fastapi_endpoints(self):
+        with patch.object(main.app, "root_path", "/api"):
+            response = TestClient(main.app).get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
 
     def test_sse_stream_sends_initial_snapshot_and_pushes_new_telemetry(self):
         async def read_stream_events():

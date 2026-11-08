@@ -65,7 +65,11 @@ _gtfs_realtime_cache: dict[str, object] = {"expires_at": 0.0, "data": None}
 _gtfs_realtime_cache_lock = threading.Lock()
 _gtfs_realtime_last_known: dict[str, dict[str, object]] = {}
 
-app = FastAPI(title="Bus Stop Telemetry Demo", version="0.1.0")
+app = FastAPI(
+    title="Bus Stop Telemetry Demo",
+    version="0.1.0",
+    root_path="/api" if os.environ.get("VERCEL") else "",
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

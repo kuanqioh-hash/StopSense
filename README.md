@@ -71,7 +71,7 @@ The development proxy only applies to `npm run dev`. Production builds read `VIT
 
 ### Vercel multi-service demo
 
-`vercel.json` configures two services: `frontend` (Vite, public at `/`) and `app` (FastAPI, public under `/api`). Import the repository with the project root set to `.`. The API rewrite sends `/api/*` to FastAPI, where a request-path transform removes the `/api` prefix to match the existing root-level routes. The frontend build sets `VITE_API_URL=/api`. There are no service bindings because the browser calls the API through the public same-domain route; no server-side service calls exist.
+`vercel.json` configures two services: `frontend` (Vite, public at `/`) and `app` (FastAPI, public under `/api`). Import the repository with the project root set to `.`. The API rewrite sends `/api/*` to FastAPI. A service request-path transform strips `/api`; the FastAPI app also sets `root_path=/api` on Vercel so root-level routes continue to work if the original prefixed path reaches the runtime. The frontend build sets `VITE_API_URL=/api`. There are no service bindings because the browser calls the API through the public same-domain route; no server-side service calls exist.
 
 This is only a demo deployment. Every API endpoint is public and unauthenticated, including operations and advertiser-inquiry management. Vercel's function filesystem is temporary, so the API uses `/tmp/telemetry.db`; data may disappear or differ across function instances, and the in-process live telemetry stream is not a durable cross-instance channel. Do not enter real advertiser contact details or rely on this deployment for persistent sensor/operations data. Use authenticated endpoints and a durable database before production use.
 

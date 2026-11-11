@@ -138,7 +138,7 @@ Install the serial bridge dependencies and start FastAPI as described above. In 
 
 ```bash
 python -m pip install -r requirements-arduino.txt
-python arduino_serial_bridge.py --port /dev/cu.usbmodem1101 --api-url http://127.0.0.1:8000/telemetry --device-id stop-01
+python arduino_serial_bridge.py --port /dev/cu.usbmodem1101 --api-url http://127.0.0.1:8000/telemetry --device-id USJ7
 ```
 
 Replace the example port with the Uno's port shown in Arduino IDE (**Tools > Port**); macOS ports commonly begin `/dev/cu.usbmodem`, Windows ports look like `COM3`, and Linux ports commonly look like `/dev/ttyACM0`. The bridge also accepts `SERIAL_PORT`, `TELEMETRY_URL`, and `DEVICE_ID` environment variables. Close Arduino IDE's Serial Monitor before running the bridge because only one process can use the serial port at a time. Stop it with Ctrl+C.
@@ -155,7 +155,7 @@ In Arduino IDE, select either an ESP32 board or Uno and its USB port, install **
 
 ```bash
 python -m pip install -r requirements-arduino.txt
-python arduino_serial_bridge.py --port /dev/cu.usbserial-0001 --api-url https://CoolStop.onrender.com/telemetry --device-id stop-01
+python arduino_serial_bridge.py --port /dev/cu.usbserial-0001 --api-url https://CoolStop.onrender.com/telemetry --device-id USJ7
 ```
 
 Replace the sample port with the board's USB port shown in Arduino IDE. Keep the computer and internet connection available while the bridge runs. The StopSense frontend must use that same backend URL to display incoming readings. The backend's public demo API has no authentication, so use only its intended demo deployment; do not expose a new API publicly without authentication and deployment safeguards.
@@ -188,7 +188,7 @@ The simulator and USB serial bridge send this schema to `POST /telemetry`. Firmw
 
 ```json
 {
-  "device_id": "stop-01",
+  "device_id": "USJ7",
   "timestamp": "2026-10-19T08:30:00+00:00",
   "temperature_c": 31.2,
   "humidity_pct": 72.0,
@@ -201,7 +201,7 @@ The simulator and USB serial bridge send this schema to `POST /telemetry`. Firmw
 }
 ```
 
-The API validates values and returns HTTP `201` for accepted data or `422` for invalid fields. `crowd_level` accepts `Low`, `Moderate`, `High`, or `Unknown`; `crowd_source` identifies `simulated`, `manual`, `sensor`, `operator`, or `unknown` data; omitted sources default to `unknown`. Read recent records at `GET /telemetry?limit=200`; filter by device with `GET /telemetry?device_id=stop-01`.
+The API validates values and returns HTTP `201` for accepted data or `422` for invalid fields. `crowd_level` accepts `Low`, `Moderate`, `High`, or `Unknown`; `crowd_source` identifies `simulated`, `manual`, `sensor`, `operator`, or `unknown` data; omitted sources default to `unknown`. Read recent records at `GET /telemetry?limit=200`; filter by device with `GET /telemetry?device_id=USJ7`.
 
 For real deployment, only report a stop crowd level from a verified source (for example manual observation or an approved people-counting sensor), with a timestamp and source label. GPS on buses does not provide occupancy. The local doorway counter below estimates onboard occupancy from observed crossings; it does not measure the waiting crowd and is not a substitute for a validated passenger-counting system.
 

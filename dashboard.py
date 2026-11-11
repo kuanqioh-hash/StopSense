@@ -23,9 +23,9 @@ st.caption(
 def preview_readings() -> pd.DataFrame:
     now = pd.Timestamp.now(tz="UTC")
     samples = [
-        ("demo-stop-01", 31.2, 72.0, 82.0, 13.8, True, "Moderate", None),
-        ("demo-stop-02", 33.4, 78.0, 61.0, 15.1, True, "High", None),
-        ("demo-stop-03", 30.1, 69.0, 94.0, 0.4, False, "Low", "STANDBY"),
+        ("USJ7", 31.2, 72.0, 82.0, 13.8, True, "Moderate", None),
+        ("Putra Heights", 33.4, 78.0, 61.0, 15.1, True, "High", None),
+        ("Subang Jaya", 30.1, 69.0, 94.0, 0.4, False, "Low", "STANDBY"),
     ]
     preview = pd.DataFrame(
         [

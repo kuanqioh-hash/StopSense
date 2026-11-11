@@ -46,16 +46,15 @@ GTFS_REALTIME_FRESH_POSITION_SECONDS = 2 * 60
 GTFS_TIMEZONE = ZoneInfo("Asia/Kuala_Lumpur")
 GTFS_STATIONS = {
     "usj7": {
-        "name": "USJ 7 · SJ693 LRT USJ 7",
+        "name": "USJ7",
         "stops": ("1006526",),
     },
-
     "subang-jaya": {
-        "name": "LRT Subang Jaya",
+        "name": "Subang Jaya",
         "stops": ("1006524",),
     },
     "putra-heights": {
-        "name": "LRT Putra Heights",
+        "name": "Putra Heights",
         "stops": ("1006550",),
     },
 }

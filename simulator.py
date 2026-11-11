@@ -7,7 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 API_URL = os.environ.get("TELEMETRY_URL", "http://127.0.0.1:8000/telemetry")
-DEVICE_ID = os.environ.get("DEVICE_ID", "demo-stop-01")
+DEVICE_ID = os.environ.get("DEVICE_ID", "USJ7")
 INTERVAL_SECONDS = max(1, int(os.environ.get("SEND_INTERVAL_SECONDS", "5")))
 
 

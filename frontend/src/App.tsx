@@ -52,9 +52,9 @@ const viewIcons: Record<View, string> = {
   operations: '⌘',
 }
 const rapidKlStations: TransitStationOption[] = [
-  { id: 'usj7', name: 'USJ 7 · SJ693 LRT USJ 7' },
-  { id: 'subang-jaya', name: 'LRT Subang Jaya' },
-  { id: 'putra-heights', name: 'LRT Putra Heights' },
+  { id: 'usj7', name: 'USJ7' },
+  { id: 'putra-heights', name: 'Putra Heights' },
+  { id: 'subang-jaya', name: 'Subang Jaya' },
 ]
 
 function getSavedSampleAccount(): SampleAccount | null {
@@ -74,9 +74,9 @@ const routes: Route[] = [
 ]
 
 const previewReadings: Reading[] = [
-  { id: 1, device_id: 'demo-stop-01', timestamp: new Date().toISOString(), temperature_c: 31.2, humidity_pct: 72, water_level_pct: 82, power_w: 13.8, cooler_on: true, crowd_level: 'Moderate', crowd_source: 'simulated', fault_code: null },
-  { id: 2, device_id: 'demo-stop-02', timestamp: new Date().toISOString(), temperature_c: 33.4, humidity_pct: 78, water_level_pct: 61, power_w: 15.1, cooler_on: true, crowd_level: 'High', crowd_source: 'simulated', fault_code: null },
-  { id: 3, device_id: 'demo-stop-03', timestamp: new Date().toISOString(), temperature_c: 30.1, humidity_pct: 69, water_level_pct: 94, power_w: 0.4, cooler_on: false, crowd_level: 'Low', crowd_source: 'simulated', fault_code: 'STANDBY' },
+  { id: 1, device_id: 'USJ7', timestamp: new Date().toISOString(), temperature_c: 31.2, humidity_pct: 72, water_level_pct: 82, power_w: 13.8, cooler_on: true, crowd_level: 'Moderate', crowd_source: 'simulated', fault_code: null },
+  { id: 2, device_id: 'Putra Heights', timestamp: new Date().toISOString(), temperature_c: 33.4, humidity_pct: 78, water_level_pct: 61, power_w: 15.1, cooler_on: true, crowd_level: 'High', crowd_source: 'simulated', fault_code: null },
+  { id: 3, device_id: 'Subang Jaya', timestamp: new Date().toISOString(), temperature_c: 30.1, humidity_pct: 69, water_level_pct: 94, power_w: 0.4, cooler_on: false, crowd_level: 'Low', crowd_source: 'simulated', fault_code: 'STANDBY' },
 ]
 
 function formatEta(seconds: number) {

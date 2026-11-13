@@ -117,6 +117,8 @@ class RapidKlGtfsTests(unittest.TestCase):
         self.assertEqual(len(result["departures"]), 1)
         self.assertEqual(result["departures"][0]["route"], "770")
         self.assertTrue(result["departures"][0]["minutes_until"] > 0)
+        self.assertEqual(len(result["timetable"]), 2)
+        self.assertTrue(all("scheduled_at" in departure for departure in result["timetable"]))
 
     def test_lrt_stations_use_live_vehicle_positions(self):
         for station_id, trip_id, latitude, bearing in (
@@ -276,6 +278,40 @@ class RapidKlGtfsTests(unittest.TestCase):
             result = main.transit_departures("usj7")
         self.assertFalse(result["realtime"])
         self.assertEqual(len(result["departures"]), 1)
+
+    def test_full_day_timetable_keeps_past_trips_and_expands_frequency_windows(self):
+        feed = {
+            "departures": [
+                {
+                    "stop_id": "1006526", "service_id": "daily", "arrival_time": "06:00:00",
+                    "departure_time": "06:00:00", "route": "770", "destination": "HAB PASAR SENI",
+                    "stop_name": "SJ693", "sequence": 1, "trip_id": "scheduled-trip",
+                },
+                {
+                    "stop_id": "1006526", "service_id": "daily", "arrival_time": "11:00:00",
+                    "departure_time": "11:00:00", "route": "T776", "destination": "SUBANG MEWAH",
+                    "stop_name": "SJ693", "sequence": 1, "trip_id": "frequency-trip",
+                    "frequency_windows": [{
+                        "start_time": "11:00:00", "end_time": "14:00:00", "headway_secs": 3600,
+                        "exact_times": "0", "offset_seconds": 0,
+                    }],
+                },
+            ],
+            "calendar": [self.calendar],
+            "calendar_dates": [],
+        }
+        now = datetime.combine(self.service_date, datetime.min.time(), main.GTFS_TIMEZONE) + timedelta(hours=12, minutes=15)
+
+        timetable = main._scheduled_station_departures(
+            feed, "usj7", now, include_past=True, same_calendar_day=True, limit=None
+        )
+        upcoming = main._scheduled_station_departures(feed, "usj7", now)
+
+        self.assertEqual([item["scheduled_time"] for item in timetable], ["06:00", "11:00", "12:00", "13:00"])
+        self.assertTrue(all(item["frequency_based"] is False for item in timetable[:1]))
+        self.assertTrue(all(item["frequency_based"] is True for item in timetable[1:]))
+        self.assertTrue(all(item["exact_times"] is False for item in timetable[1:]))
+        self.assertEqual([item["scheduled_time"] for item in upcoming], ["13:00"])
 
     def test_schedule_fallback_respects_service_calendar_and_day_boundary(self):
         feed = {

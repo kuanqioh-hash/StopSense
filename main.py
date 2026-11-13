@@ -340,10 +340,14 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "bus-stop-telemetry-demo"}
 
 
-def _parse_gtfs_time(value: str, service_date: date) -> datetime:
+def _gtfs_time_seconds(value: str) -> int:
     hours, minutes, seconds = (int(part) for part in value.split(":"))
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _parse_gtfs_time(value: str, service_date: date) -> datetime:
     return datetime.combine(service_date, datetime.min.time(), GTFS_TIMEZONE) + timedelta(
-        hours=hours, minutes=minutes, seconds=seconds
+        seconds=_gtfs_time_seconds(value)
     )
 
 
@@ -398,9 +402,27 @@ def _download_gtfs() -> dict[str, object]:
                     stop_id for station in GTFS_STATIONS.values() for stop_id in station["stops"]
                 }
                 realtime_stop_ids = stop_ids
+                stop_time_rows = read_csv("stop_times.txt")
+                frequency_rows = read_csv("frequencies.txt") if "frequencies.txt" in archive_files else []
+                frequencies_by_trip: dict[str, list[dict[str, str]]] = {}
+                for frequency in frequency_rows:
+                    frequencies_by_trip.setdefault(frequency["trip_id"], []).append(frequency)
+                first_departure_by_trip: dict[str, tuple[int, str]] = {}
+                for row in stop_time_rows:
+                    trip_id = row["trip_id"]
+                    if trip_id not in frequencies_by_trip:
+                        continue
+                    sequence = int(row.get("stop_sequence") or 0)
+                    previous = first_departure_by_trip.get(trip_id)
+                    if previous is None or sequence < previous[0]:
+                        first_departure_by_trip[trip_id] = (
+                            sequence,
+                            row.get("departure_time") or row.get("arrival_time", ""),
+                        )
+
                 departures = []
                 live_trip_ids: set[str] = set()
-                for row in read_csv("stop_times.txt"):
+                for row in stop_time_rows:
                     if row["stop_id"] not in stop_ids:
                         continue
                     trip = trips.get(row["trip_id"])
@@ -410,6 +432,22 @@ def _download_gtfs() -> dict[str, object]:
                     if row["stop_id"] in realtime_stop_ids:
                         live_trip_ids.add(row["trip_id"])
                     stop = stops.get(row["stop_id"], {})
+                    first_departure = first_departure_by_trip.get(row["trip_id"])
+                    frequency_windows = []
+                    if first_departure:
+                        offset_seconds = _gtfs_time_seconds(
+                            row.get("arrival_time") or row.get("departure_time", "")
+                        ) - _gtfs_time_seconds(first_departure[1])
+                        frequency_windows = [
+                            {
+                                "start_time": frequency["start_time"],
+                                "end_time": frequency["end_time"],
+                                "headway_secs": int(frequency["headway_secs"]),
+                                "exact_times": frequency.get("exact_times", "0"),
+                                "offset_seconds": offset_seconds,
+                            }
+                            for frequency in frequencies_by_trip[row["trip_id"]]
+                        ]
                     departures.append({
                         "stop_id": row["stop_id"],
                         "stop_name": stop.get("stop_name", ""),
@@ -424,6 +462,7 @@ def _download_gtfs() -> dict[str, object]:
                         "service_id": trip["service_id"],
                         "arrival_time": row.get("arrival_time") or row.get("departure_time", ""),
                         "departure_time": row.get("departure_time") or row.get("arrival_time", ""),
+                        "frequency_windows": frequency_windows,
                     })
                 shapes: dict[str, list[dict[str, float]]] = {}
                 live_shape_ids = {trips[trip_id].get("shape_id", "") for trip_id in live_trip_ids}
@@ -621,7 +660,15 @@ def _live_station_departures(feed: dict[str, object], station_id: str, now: date
     return results[:6]
 
 
-def _scheduled_station_departures(feed: dict[str, object], station_id: str, now: datetime) -> list[dict[str, object]]:
+def _scheduled_station_departures(
+    feed: dict[str, object],
+    station_id: str,
+    now: datetime,
+    *,
+    include_past: bool = False,
+    same_calendar_day: bool = False,
+    limit: int | None = 6,
+) -> list[dict[str, object]]:
     station_stop_ids = set(GTFS_STATIONS[station_id]["stops"])
     calendar = feed["calendar"]
     calendar_dates = feed["calendar_dates"]
@@ -632,21 +679,45 @@ def _scheduled_station_departures(feed: dict[str, object], station_id: str, now:
         for item in feed["departures"]:
             if item["stop_id"] not in station_stop_ids or item["service_id"] not in active_services:
                 continue
-            arrival_time = item.get("arrival_time") or item["departure_time"]
-            arrival_at = _parse_gtfs_time(arrival_time, service_date)
-            if arrival_at < now:
-                continue
-            scheduled.append({
-                "route": item["route"],
-                "destination": item["destination"],
-                "stop_name": item["stop_name"],
-                "scheduled_at": arrival_at.isoformat(),
-                "scheduled_time": arrival_at.strftime("%H:%M"),
-                "minutes_until": max(0, int((arrival_at - now).total_seconds() / 60)),
-            })
+
+            frequency_windows = item.get("frequency_windows", [])
+            candidates = []
+            if frequency_windows:
+                for window in frequency_windows:
+                    start_seconds = _gtfs_time_seconds(window["start_time"])
+                    end_seconds = _gtfs_time_seconds(window["end_time"])
+                    headway_seconds = int(window["headway_secs"])
+                    if headway_seconds <= 0:
+                        continue
+                    for start in range(start_seconds, end_seconds, headway_seconds):
+                        scheduled_at = _parse_gtfs_time(
+                            f"{start // 3600:02}:{(start % 3600) // 60:02}:{start % 60:02}",
+                            service_date,
+                        ) + timedelta(seconds=int(window["offset_seconds"]))
+                        candidates.append((scheduled_at, True, headway_seconds, window.get("exact_times") == "1"))
+            else:
+                arrival_time = item.get("arrival_time") or item["departure_time"]
+                candidates.append((_parse_gtfs_time(arrival_time, service_date), False, None, True))
+
+            for arrival_at, frequency_based, headway_seconds, exact_times in candidates:
+                if same_calendar_day and arrival_at.date() != now.date():
+                    continue
+                if not include_past and arrival_at < now:
+                    continue
+                scheduled.append({
+                    "route": item["route"],
+                    "destination": item["destination"],
+                    "stop_name": item["stop_name"],
+                    "scheduled_at": arrival_at.isoformat(),
+                    "scheduled_time": arrival_at.strftime("%H:%M"),
+                    "minutes_until": max(0, int((arrival_at - now).total_seconds() / 60)),
+                    "frequency_based": frequency_based,
+                    "headway_minutes": int(headway_seconds / 60) if headway_seconds else None,
+                    "exact_times": exact_times,
+                })
 
     scheduled.sort(key=lambda item: item["scheduled_at"])
-    return scheduled[:6]
+    return scheduled if limit is None else scheduled[:limit]
 
 
 @app.get("/transit/departures")
@@ -662,11 +733,15 @@ def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> 
     except HTTPException:
         departures = []
 
+    timetable = _scheduled_station_departures(
+        feed, station_id, now, include_past=True, same_calendar_day=True, limit=None
+    )
     if departures:
         return {
             "station": station,
             "stop_ids": station["stop_ids"],
             "departures": departures,
+            "timetable": timetable,
             "source": "RapidKL GTFS-Realtime vehicle positions (estimated)",
             "realtime": True,
             "estimate": True,
@@ -679,6 +754,7 @@ def transit_departures(station_id: str = Query(min_length=1, max_length=32)) -> 
         "station": station,
         "stop_ids": station["stop_ids"],
         "departures": _scheduled_station_departures(feed, station_id, now),
+        "timetable": timetable,
         "source": "RapidKL GTFS Static schedule",
         "realtime": False,
         "estimate": False,

@@ -30,7 +30,8 @@ type PassengerCount = {
 type View = 'passenger' | 'screen' | 'operations'
 type Route = { route: string; destination: string }
 type TransitStationOption = { id: string; name: string }
-type TransitDeparture = { route: string; destination: string; stop_name: string; scheduled_at?: string; arrival_at?: string; scheduled_time: string; minutes_until: number; vehicle_id?: string; position_age_seconds?: number; stale_position?: boolean }
+type TransitDeparture = { route: string; destination: string; stop_name: string; scheduled_at?: string; arrival_at?: string; scheduled_time: string; minutes_until: number; vehicle_id?: string; position_age_seconds?: number; stale_position?: boolean; frequency_based?: boolean; headway_minutes?: number | null; exact_times?: boolean }
+type TimetableDeparture = TransitDeparture & { scheduled_at: string }
 type TransitStation = { id: string; name: string; stop_ids: string[]; stops: { stop_id: string; stop_name: string; stop_lat: string; stop_lon: string }[] }
 type SampleAccount = { id: string; name: string; initials: string; role: string; description: string; defaultView: View }
 
@@ -120,6 +121,7 @@ function App() {
   const [passengerCounts, setPassengerCounts] = useState<PassengerCount[]>([])
   const [selectedStationId, setSelectedStationId] = useState('usj7')
   const [transitDepartures, setTransitDepartures] = useState<TransitDeparture[]>([])
+  const [transitTimetable, setTransitTimetable] = useState<TimetableDeparture[]>([])
   const [transitRealtime, setTransitRealtime] = useState(false)
   const [transitStation, setTransitStation] = useState<TransitStation | null>(null)
   const [transitFetchedAt, setTransitFetchedAt] = useState('')
@@ -233,18 +235,20 @@ function App() {
       try {
         const response = await fetch(`${API}/transit/departures?station_id=${encodeURIComponent(selectedStationId)}`)
         if (!response.ok) throw new Error(`RapidKL transit request failed (${response.status})`)
-        const data = await response.json() as { station: TransitStation; departures: TransitDeparture[]; fetched_at: string; realtime?: boolean }
+        const data = await response.json() as { station: TransitStation; departures: TransitDeparture[]; timetable?: TimetableDeparture[]; fetched_at: string; realtime?: boolean }
         if (!Array.isArray(data.departures) || !data.station) throw new Error('Unexpected RapidKL transit response')
         if (active) {
           setTransitStation(data.station)
           setTransitFetchedAt(data.fetched_at)
           setTransitDepartures(data.departures)
+          setTransitTimetable(Array.isArray(data.timetable) ? data.timetable : [])
           setTransitRealtime(data.realtime === true)
           setTransitError('')
         }
       } catch (cause) {
         if (active) {
           setTransitDepartures([])
+          setTransitTimetable([])
           setTransitRealtime(false)
           setTransitError(cause instanceof Error ? cause.message : 'RapidKL schedule is unavailable')
         }
@@ -309,7 +313,7 @@ function App() {
 
         <div className="stop-toolbar">
           <div className="stop-label"><span className="pin">⌖</span><span><strong>YOUR BUS STOP</strong><small>Selection updates stop conditions and GTFS arrivals</small></span></div>
-          <label className="select-wrap"><span className="sr-only">Select bus stop</span><select value={selectedStationId} onChange={(event) => { setTransitDepartures([]); setTransitRealtime(false); setTransitStation(null); setTransitLoading(true); setSelectedStationId(event.target.value) }}>{rapidKlStations.map((station) => <option key={station.id} value={station.id}>{station.name}</option>)}</select><span className="select-chevron">⌄</span></label>
+          <label className="select-wrap"><span className="sr-only">Select bus stop</span><select value={selectedStationId} onChange={(event) => { setTransitDepartures([]); setTransitTimetable([]); setTransitRealtime(false); setTransitStation(null); setTransitLoading(true); setSelectedStationId(event.target.value) }}>{rapidKlStations.map((station) => <option key={station.id} value={station.id}>{station.name}</option>)}</select><span className="select-chevron">⌄</span></label>
         </div>
         <div className="stop-toolbar transit-toolbar">
           <div className="stop-label"><span className="pin">⌖</span><span><strong>{transitRealtime ? 'LIVE-POSITION ARRIVAL ESTIMATES' : 'SCHEDULED ARRIVALS'}</strong><small>{transitLoading ? 'Loading RapidKL transit data…' : `${transitRealtime ? 'Live vehicle positions' : 'RapidKL GTFS static schedule'} · checked ${formatTimestamp(transitFetchedAt)}`}</small></span></div>
@@ -323,6 +327,7 @@ function App() {
           <TransitArrivalCard departures={transitDepartures} stationName={stationName} loading={transitLoading} error={transitError} now={now} estimated={transitRealtime} />
           <article className="comfort-card"><div className="section-heading"><div><span className="card-kicker">AT YOUR STOP</span><h2>Waiting conditions</h2></div></div><p>{loading && latest.length === 0 ? 'Connecting to the stop telemetry service…' : `No sensor readings are available for ${stationName} yet.`}</p></article>
         </section>}
+        <TimetablePanel departures={transitTimetable} stationName={stationName} now={now} loading={transitLoading} />
         {view !== 'screen' && <SolarGeneration />}
         {view === 'operations' && <PassengerFlow reports={passengerCounts} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} />}
 
@@ -363,6 +368,43 @@ function AuthScreen({ onSignIn, theme, onToggleTheme }: { onSignIn: (account: Sa
   )
 }
 
+function TimetablePanel({ departures, stationName, now, loading }: { departures: TimetableDeparture[]; stationName: string; now: number; loading: boolean }) {
+  return (
+    <section className="timetable-panel" aria-labelledby="timetable-title">
+      <div className="timetable-heading">
+        <div><span className="card-kicker">RAPIDKL GTFS STATIC</span><h2 id="timetable-title">Full-day timetable · {stationName}</h2></div>
+        <span className="timetable-count">{departures.length} listed</span>
+      </div>
+      {departures.length > 0 ? <>
+        <details className="timetable-details">
+          <summary>Show all {departures.length} entries · past and upcoming</summary>
+          <div className="timetable-list" aria-label="Today's scheduled departures">
+            {departures.map((departure) => {
+              const past = new Date(departure.scheduled_at).getTime() < now
+              const approximate = departure.frequency_based && departure.exact_times !== true
+              return <div className={`timetable-row ${past ? 'timetable-past' : ''}`} key={`${departure.scheduled_at}-${departure.route}-${departure.destination}`}>
+                <time dateTime={departure.scheduled_at}>{approximate ? '~' : ''}{departure.scheduled_time}</time>
+                <span className="route-chip small">{departure.route}</span>
+                <span className="timetable-destination">{departure.destination}<small>{departure.stop_name}</small></span>
+                <span className={`timetable-status ${past ? 'past' : ''}`}>{past ? 'Passed' : 'Upcoming'}{departure.frequency_based ? ` · ${departure.headway_minutes} min frequency` : ''}</span>
+              </div>
+            })}
+          </div>
+        </details>
+        <p className="timetable-note">Times are from the RapidKL static GTFS feed. Frequency-based entries marked “~” are approximate headway patterns, not guaranteed departure times; actual service may differ. No departures are invented for gaps in the feed.</p>
+      </> : <p className="timetable-empty">{loading ? 'Loading today’s GTFS timetable…' : 'No scheduled service is listed for this stop today.'}</p>}
+    </section>
+  )
+}
+
+function scheduleTimeLabel(departure: TransitDeparture) {
+  const approximate = departure.frequency_based && departure.exact_times !== true
+  const frequency = departure.frequency_based && departure.headway_minutes
+    ? ` · ${approximate ? 'approx. ' : ''}${departure.headway_minutes} min frequency`
+    : ''
+  return `${approximate ? '~' : ''}${departure.scheduled_time}${frequency}`
+}
+
 function TransitArrivalCard({ departures, stationName, loading, error, now, estimated }: { departures: TransitDeparture[]; stationName: string; loading: boolean; error: string; now: number; estimated: boolean }) {
   const nextBus = departures[0]
   const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(transitTimestamp(departure)).getTime() - now) / 60000))
@@ -372,8 +414,8 @@ function TransitArrivalCard({ departures, stationName, loading, error, now, esti
       {nextBus ? <>
         <div className="arrival-main"><div><span className="route-chip">{nextBus.route}</span><span className="destination">{nextBus.destination}</span></div><strong>{formatEta(minutesUntil(nextBus) * 60)}</strong></div>
         <div className="arrival-progress"><span style={{ width: `${Math.max(8, 100 - minutesUntil(nextBus) / 60 * 100)}%` }} /></div>
-        <div className="arrival-foot"><span>{nextBus.stop_name}</span><span>{estimated ? `Estimated ${nextBus.scheduled_time}${nextBus.stale_position ? ` · ${lastPositionNote(nextBus)}` : ''}` : `Scheduled ${nextBus.scheduled_time}`}</span></div>
-        <div className="upcoming-list">{departures.slice(1, 3).map((bus) => <div className="upcoming-row" key={`${bus.route}-${bus.arrival_at ?? bus.scheduled_at}`}><span><b>{bus.route}</b> · {bus.destination} <small>{bus.stop_name}{bus.stale_position ? ` · ${lastPositionNote(bus)}` : ''}</small></span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>)}</div>
+        <div className="arrival-foot"><span>{nextBus.stop_name}</span><span>{estimated ? `Estimated ${nextBus.scheduled_time}${nextBus.stale_position ? ` · ${lastPositionNote(nextBus)}` : ''}` : `Scheduled ${scheduleTimeLabel(nextBus)}`}</span></div>
+        <div className="upcoming-list">{departures.slice(1, 3).map((bus) => <div className="upcoming-row" key={`${bus.route}-${bus.arrival_at ?? bus.scheduled_at}`}><span><b>{bus.route}</b> · {bus.destination} <small>{bus.stop_name}{bus.stale_position ? ` · ${lastPositionNote(bus)}` : !estimated ? ` · ${scheduleTimeLabel(bus)}` : ''}</small></span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>)}</div>
       </> : <div className="bus-crowd-reading bus-crowd-inactive"><strong>{loading ? 'Loading transit data…' : error ? 'Transit data unavailable' : estimated ? 'No live vehicle estimate available' : 'No scheduled departures available'}</strong><span>{estimated ? 'Estimates use matching live positions or a last-known GPS location up to 10 minutes old.' : 'No upcoming service is listed in the current static RapidKL schedule.'}</span></div>}
     </article>
   )
@@ -459,7 +501,7 @@ function StopScreen({ reading, departures, stationName, loading, now, estimated,
               {departures.length > 0 ? departures.map((bus) => (
                 <article className="screen-arrival-card" key={`${bus.route}-${bus.arrival_at ?? bus.scheduled_at}`}>
                   <div className="screen-arrival-card-top"><span className="screen-route small">{bus.route}</span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>
-                  <span className="screen-arrival-destination">{bus.destination} · {estimated ? 'Estimated' : 'Scheduled'} {bus.scheduled_time}{bus.stale_position ? ` · ${lastPositionNote(bus)}` : ''}</span>
+                  <span className="screen-arrival-destination">{bus.destination} · {estimated ? `Estimated ${bus.scheduled_time}` : `Scheduled ${scheduleTimeLabel(bus)}`}{bus.stale_position ? ` · ${lastPositionNote(bus)}` : ''}</span>
                 </article>
               )) : <p>{loading ? 'Loading RapidKL transit data…' : estimated ? 'No live vehicle estimate available from positions up to 10 minutes old.' : 'No upcoming scheduled departures are listed.'}</p>}
             </div>

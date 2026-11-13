@@ -319,10 +319,9 @@ function App() {
           <div className="stop-label"><span className="pin">⌖</span><span><strong>{transitRealtime ? 'LIVE-POSITION ARRIVAL ESTIMATES' : 'SCHEDULED ARRIVALS'}</strong><small>{transitLoading ? 'Loading RapidKL transit data…' : `${transitRealtime ? 'Live vehicle positions' : 'RapidKL GTFS static schedule'} · checked ${formatTimestamp(transitFetchedAt)}`}</small></span></div>
         </div>
         {transitError && <div className="notice-error" role="status">RapidKL transit data unavailable: {transitError}. Check that the backend can reach the official feed.</div>}
-        {reading ? <>
+        {view === 'operations' ? <OperationsView readings={latest} reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} estimated={transitRealtime} /> : reading ? <>
           {view === 'passenger' && <PassengerView reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} error={transitError} now={now} estimated={transitRealtime} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} report={passengerCounts.filter((report) => report.bus_route === selectedBusRoute).sort((a, b) => b.observed_at.localeCompare(a.observed_at))[0]} />}
           {view === 'screen' && <StopScreen reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} estimated={transitRealtime} route={selectedBusRoute} />}
-          {view === 'operations' && <OperationsView readings={latest} reading={reading} departures={transitDepartures} stationName={stationName} loading={transitLoading} now={now} estimated={transitRealtime} />}
         </> : <section className="passenger-grid">
           <TransitArrivalCard departures={transitDepartures} stationName={stationName} loading={transitLoading} error={transitError} now={now} estimated={transitRealtime} />
           <article className="comfort-card"><div className="section-heading"><div><span className="card-kicker">AT YOUR STOP</span><h2>Waiting conditions</h2></div></div><p>{loading && latest.length === 0 ? 'Connecting to the stop telemetry service…' : `No sensor readings are available for ${stationName} yet.`}</p></article>
@@ -527,26 +526,26 @@ function StopScreen({ reading, departures, stationName, loading, now, estimated,
   )
 }
 
-function OperationsView({ readings, reading, departures, stationName, loading, now, estimated }: { readings: Reading[]; reading: Reading; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number; estimated: boolean }) {
-  const fault = reading.fault_code
+function OperationsView({ readings, reading, departures, stationName, loading, now, estimated }: { readings: Reading[]; reading: Reading | undefined; departures: TransitDeparture[]; stationName: string; loading: boolean; now: number; estimated: boolean }) {
+  const fault = reading?.fault_code
   const minutesUntil = (departure: TransitDeparture) => Math.max(0, Math.ceil((new Date(transitTimestamp(departure)).getTime() - now) / 60000))
-  const state = fault ? 'Needs attention' : reading.cooler_on === null ? 'Partial telemetry' : reading.cooler_on ? 'Cooling active' : 'Standby'
+  const state = !reading ? 'No telemetry' : fault ? 'Needs attention' : reading.cooler_on === null ? 'Partial telemetry' : reading.cooler_on ? 'Cooling active' : 'Standby'
   return (
     <section className="operations-view">
       <div className="operations-heading"><div><span className="card-kicker">FLEET MONITOR</span><h2>Stop operations</h2></div><span className={`state-badge ${fault ? 'fault' : ''}`}><i />{state}</span></div>
       <div className="ops-grid">
-        <OpsMetric label="Air temperature" value={`${reading.temperature_c.toFixed(1)} °C`} icon="☀" note="Shelter sensor" />
-        <OpsMetric label="Relative humidity" value={`${reading.humidity_pct.toFixed(1)}%`} icon="≈" note="Shelter sensor" />
-        <OpsMetric label="Water remaining" value={reading.water_level_pct === null ? 'Not reported' : `${reading.water_level_pct.toFixed(0)}%`} icon="♧" note={reading.water_level_pct !== null && reading.water_level_pct < 20 ? 'Refill required' : reading.water_level_pct === null ? 'No water sensor' : 'Tank level'} alert={reading.water_level_pct !== null && reading.water_level_pct < 20} />
-        <OpsMetric label="Power draw" value={reading.power_w === null ? 'Not reported' : `${reading.power_w.toFixed(1)} W`} icon="ϟ" note={reading.power_w === null ? 'No power sensor' : 'Cooling equipment'} />
+        <OpsMetric label="Air temperature" value={reading ? `${reading.temperature_c.toFixed(1)} °C` : 'Unavailable'} icon="☀" note={reading ? 'Shelter sensor' : 'No sensor reading for this stop'} />
+        <OpsMetric label="Relative humidity" value={reading ? `${reading.humidity_pct.toFixed(1)}%` : 'Unavailable'} icon="≈" note={reading ? 'Shelter sensor' : 'No sensor reading for this stop'} />
+        <OpsMetric label="Water remaining" value={!reading || reading.water_level_pct === null ? 'Not reported' : `${reading.water_level_pct.toFixed(0)}%`} icon="♧" note={!reading || reading.water_level_pct === null ? 'No water sensor' : reading.water_level_pct < 20 ? 'Refill required' : 'Tank level'} alert={Boolean(reading && reading.water_level_pct !== null && reading.water_level_pct < 20)} />
+        <OpsMetric label="Power draw" value={!reading || reading.power_w === null ? 'Not reported' : `${reading.power_w.toFixed(1)} W`} icon="ϟ" note={!reading || reading.power_w === null ? 'No power sensor' : 'Cooling equipment'} />
       </div>
       {fault && <div className="fault-banner"><strong>Fault reported: {fault}</strong><span>Inspect the device and confirm water and sensor status.</span></div>}
       <div className="ops-lower-grid">
         <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">{estimated ? 'RAPIDKL LIVE POSITIONS' : 'RAPIDKL GTFS STATIC'}</span><h3>{stationName} {estimated ? 'arrival estimates' : 'departures'}</h3></div><span className="simulated-tag">{estimated ? 'ESTIMATED' : 'SCHEDULED'}</span></div>{departures.length > 0 ? departures.slice(0, 3).map((bus) => <div className="service-row" key={`${bus.route}-${bus.arrival_at ?? bus.scheduled_at}`}><span className="route-chip small">{bus.route}</span><span className="service-destination">{bus.destination}{bus.stale_position && <small> · {lastPositionNote(bus)}</small>}</span><strong>{formatEta(minutesUntil(bus) * 60)}</strong></div>) : <p>{loading ? 'Loading transit data…' : estimated ? 'No live vehicle estimate available from positions up to 10 minutes old.' : 'No upcoming scheduled departures are listed.'}</p>}<p className="panel-footnote">{estimated ? 'GPS-based estimates from vehicle positions; last-known positions are labeled and limited to 10 minutes. These are not official trip predictions.' : 'Scheduled departures from RapidKL GTFS static; actual arrival times may differ.'}</p></article>
-        <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">DEVICE HEALTH</span><h3>{reading.device_id}</h3></div><span className="device-dot"><i /> Online</span></div><div className="health-row"><span>Waiting-area crowd</span><strong>{reading.crowd_level}</strong></div><div className="health-row"><span>Crowd data source</span><strong>{reading.crowd_source}</strong></div><div className="health-row"><span>Last sensor update</span><strong>{formatTimestamp(reading.timestamp)}</strong></div><div className="health-row"><span>Cooler state</span><strong>{reading.cooler_on === null ? 'Not reported' : reading.cooler_on ? 'On' : 'Off'}</strong></div></article>
+        <article className="ops-panel"><div className="panel-heading"><div><span className="card-kicker">DEVICE HEALTH</span><h3>{reading?.device_id ?? stationName}</h3></div><span className="device-dot"><i /> {reading ? 'Online' : 'No data'}</span></div><div className="health-row"><span>Waiting-area crowd</span><strong>{reading?.crowd_level ?? 'Unavailable'}</strong></div><div className="health-row"><span>Crowd data source</span><strong>{reading?.crowd_source ?? 'No sensor reading'}</strong></div><div className="health-row"><span>Last sensor update</span><strong>{reading ? formatTimestamp(reading.timestamp) : 'Unavailable'}</strong></div><div className="health-row"><span>Cooler state</span><strong>{!reading || reading.cooler_on === null ? 'Not reported' : reading.cooler_on ? 'On' : 'Off'}</strong></div></article>
       </div>
       <div className="site-summary"><div><strong>{readings.length}</strong><span>stops reporting</span></div><div><strong>{readings.filter((item) => item.cooler_on).length}</strong><span>coolers running</span></div><div><strong>{readings.filter((item) => Boolean(item.fault_code)).length}</strong><span>faults reported</span></div><small>Live server-pushed telemetry · Demonstration values only</small></div>
-      <AdvertisementOperations currentStopId={reading.device_id} />
+      <AdvertisementOperations currentStopId={reading?.device_id ?? stationName} />
     </section>
   )
 }

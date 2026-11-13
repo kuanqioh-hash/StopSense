@@ -17,6 +17,7 @@ export type CounterDetection = {
   bbox: [number, number, number, number]
   trackId?: number
 }
+export type DoorRegion = { left: number; top: number; right: number; bottom: number }
 export type TrackingOptions = {
   now: number
   orientation: 'horizontal' | 'vertical'
@@ -25,6 +26,8 @@ export type TrackingOptions = {
   linePosition: number
   confidenceThreshold: number
   enteringDirection: 'up' | 'down' | 'left' | 'right'
+  doorRegion?: DoorRegion | null
+  requireDoorRegion?: boolean
 }
 export function trackPeople(
   detections: CounterDetection[],

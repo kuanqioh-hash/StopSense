@@ -12,6 +12,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import requests
@@ -126,6 +127,32 @@ class PassengerCount(BaseModel):
     occupancy_count: int | None = Field(default=None, ge=0)
     confidence: float = Field(ge=0, le=1)
     status: Literal["ok", "degraded", "offline", "error"]
+
+
+class PassengerCountSessionStart(BaseModel):
+    session_id: UUID = Field(default_factory=uuid4)
+    camera_id: str = Field(min_length=1, max_length=64)
+    bus_route: str | None = Field(default=None, min_length=1, max_length=32)
+    started_at: datetime
+
+
+class PassengerCountSnapshot(BaseModel):
+    snapshot_id: UUID = Field(default_factory=uuid4)
+    camera_id: str = Field(min_length=1, max_length=64)
+    bus_route: str | None = Field(default=None, min_length=1, max_length=32)
+    observed_at: datetime
+    detected_now: int = Field(ge=0)
+    total_detected: int = Field(ge=0)
+    boarding_count: int = Field(ge=0)
+    alighting_count: int = Field(ge=0)
+    occupancy_count: int = Field(ge=0)
+    confidence: float = Field(ge=0, le=1)
+    status: Literal["ok", "degraded", "offline", "error"]
+
+
+class PassengerCountSessionEnd(BaseModel):
+    ended_at: datetime
+    status: Literal["completed", "interrupted", "error"] = "completed"
 
 
 class Advertisement(BaseModel):
@@ -265,6 +292,38 @@ def initialize_db() -> None:
                 confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
                 status TEXT NOT NULL CHECK (status IN ('ok', 'degraded', 'offline', 'error'))
             )"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS passenger_count_sessions (
+                session_id TEXT PRIMARY KEY,
+                camera_id TEXT NOT NULL,
+                bus_route TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'interrupted', 'error'))
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS passenger_count_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES passenger_count_sessions(session_id),
+                camera_id TEXT NOT NULL,
+                bus_route TEXT,
+                observed_at TEXT NOT NULL,
+                detected_now INTEGER NOT NULL CHECK (detected_now >= 0),
+                total_detected INTEGER NOT NULL CHECK (total_detected >= 0),
+                boarding_count INTEGER NOT NULL CHECK (boarding_count >= 0),
+                alighting_count INTEGER NOT NULL CHECK (alighting_count >= 0),
+                occupancy_count INTEGER NOT NULL CHECK (occupancy_count >= 0),
+                confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+                status TEXT NOT NULL CHECK (status IN ('ok', 'degraded', 'offline', 'error'))
+            )"""
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_passenger_sessions_started ON passenger_count_sessions(started_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_passenger_snapshots_session_time ON passenger_count_snapshots(session_id, observed_at DESC)"
         )
         connection.execute(
             """CREATE TABLE IF NOT EXISTS advertisements (
@@ -856,6 +915,187 @@ async def stream_telemetry(request: Request) -> StreamingResponse:
     )
 
 
+def _supabase_enabled() -> bool:
+    return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
+
+
+def _ensure_passenger_storage_configured() -> None:
+    if os.environ.get("VERCEL") and not _supabase_enabled():
+        raise HTTPException(status_code=503, detail="Persistent passenger logging is not configured")
+
+
+def _supabase_request(method: str, table: str, *, payload=None, params=None, prefer=None):
+    if not _supabase_enabled():
+        raise HTTPException(status_code=503, detail="Persistent passenger logging is not configured")
+    headers = {
+        "apikey": os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+        "Authorization": f"Bearer {os.environ['SUPABASE_SERVICE_ROLE_KEY']}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    try:
+        response = requests.request(
+            method,
+            f"{os.environ['SUPABASE_URL'].rstrip('/')}/rest/v1/{table}",
+            headers=headers,
+            params=params,
+            json=payload,
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.RequestException as error:
+        raise HTTPException(status_code=502, detail="Passenger history database request failed") from error
+    return response.json() if response.content else None
+
+
+def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+@app.post("/passenger-count-sessions", status_code=201)
+def start_passenger_count_session(session: PassengerCountSessionStart) -> dict[str, object]:
+    _ensure_passenger_storage_configured()
+    payload = session.model_dump(mode="json")
+    payload["started_at"] = _utc_iso(session.started_at)
+    if _supabase_enabled():
+        _supabase_request("POST", "passenger_count_sessions", payload=payload, prefer="return=minimal")
+    else:
+        with closing(connect_db()) as connection:
+            connection.execute(
+                """INSERT INTO passenger_count_sessions (session_id, camera_id, bus_route, started_at)
+                   VALUES (?, ?, ?, ?)""",
+                (str(session.session_id), session.camera_id, session.bus_route, payload["started_at"]),
+            )
+            connection.commit()
+    return {"session_id": str(session.session_id), "storage": "supabase" if _supabase_enabled() else "local"}
+
+
+@app.post("/passenger-count-sessions/{session_id}/snapshots", status_code=201)
+def save_passenger_count_snapshot(session_id: UUID, snapshot: PassengerCountSnapshot) -> dict[str, object]:
+    _ensure_passenger_storage_configured()
+    payload = snapshot.model_dump(mode="json")
+    payload["session_id"] = str(session_id)
+    payload["observed_at"] = _utc_iso(snapshot.observed_at)
+    if _supabase_enabled():
+        _supabase_request("POST", "passenger_count_snapshots", payload=payload, prefer="resolution=ignore-duplicates,return=minimal")
+        _supabase_request(
+            "PATCH", "passenger_count_sessions",
+            params={"session_id": f"eq.{session_id}"},
+            payload={"bus_route": snapshot.bus_route}, prefer="return=minimal",
+        )
+    else:
+        with closing(connect_db()) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM passenger_count_sessions WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Passenger count session not found")
+            connection.execute(
+                """INSERT OR IGNORE INTO passenger_count_snapshots (
+                    snapshot_id, session_id, camera_id, bus_route, observed_at, detected_now,
+                    total_detected, boarding_count, alighting_count, occupancy_count, confidence, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (payload["snapshot_id"], payload["session_id"], payload["camera_id"],
+                 payload["bus_route"], payload["observed_at"], payload["detected_now"],
+                 payload["total_detected"], payload["boarding_count"], payload["alighting_count"],
+                 payload["occupancy_count"], payload["confidence"], payload["status"]),
+            )
+            connection.execute(
+                "UPDATE passenger_count_sessions SET bus_route = ? WHERE session_id = ?",
+                (payload["bus_route"], payload["session_id"]),
+            )
+            connection.commit()
+    receive_passenger_count(PassengerCount(
+        camera_id=snapshot.camera_id,
+        bus_route=snapshot.bus_route,
+        observed_at=snapshot.observed_at,
+        boarding_count=snapshot.boarding_count,
+        alighting_count=snapshot.alighting_count,
+        occupancy_count=snapshot.occupancy_count,
+        confidence=snapshot.confidence,
+        status=snapshot.status,
+    ))
+    return {"ok": True, "snapshot_id": payload["snapshot_id"]}
+
+
+@app.post("/passenger-count-sessions/{session_id}/end")
+def end_passenger_count_session(session_id: UUID, end: PassengerCountSessionEnd) -> dict[str, object]:
+    _ensure_passenger_storage_configured()
+    payload = {"ended_at": _utc_iso(end.ended_at), "status": end.status}
+    if _supabase_enabled():
+        result = _supabase_request(
+            "PATCH", "passenger_count_sessions",
+            params={"session_id": f"eq.{session_id}"}, payload=payload, prefer="return=representation",
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="Passenger count session not found")
+    else:
+        with closing(connect_db()) as connection:
+            cursor = connection.execute(
+                "UPDATE passenger_count_sessions SET ended_at = ?, status = ? WHERE session_id = ?",
+                (payload["ended_at"], payload["status"], str(session_id)),
+            )
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Passenger count session not found")
+            connection.commit()
+    return {"ok": True, "session_id": str(session_id)}
+
+
+@app.get("/passenger-count-sessions")
+def list_passenger_count_sessions(
+    camera_id: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, list[dict[str, object]]]:
+    _ensure_passenger_storage_configured()
+    if _supabase_enabled():
+        params: dict[str, object] = {"select": "session_id,camera_id,bus_route,started_at,ended_at,status", "order": "started_at.desc", "limit": limit}
+        if camera_id:
+            params["camera_id"] = f"eq.{camera_id}"
+        sessions = _supabase_request("GET", "passenger_count_sessions", params=params) or []
+        if not sessions:
+            return {"items": []}
+        session_ids = [row["session_id"] for row in sessions]
+        snapshots = _supabase_request(
+            "GET", "passenger_count_snapshots",
+            params={
+                "select": "snapshot_id,session_id,observed_at,detected_now,total_detected,boarding_count,alighting_count,occupancy_count,confidence,status",
+                "session_id": f"in.({','.join(session_ids)})",
+                "order": "observed_at.desc",
+            },
+        ) or []
+    else:
+        with closing(connect_db()) as connection:
+            sql = "SELECT session_id, camera_id, bus_route, started_at, ended_at, status FROM passenger_count_sessions"
+            values: list[object] = []
+            if camera_id:
+                sql += " WHERE camera_id = ?"
+                values.append(camera_id)
+            sql += " ORDER BY started_at DESC LIMIT ?"
+            values.append(limit)
+            sessions = [dict(row) for row in connection.execute(sql, values).fetchall()]
+            session_ids = [row["session_id"] for row in sessions]
+            snapshots = []
+            if session_ids:
+                placeholders = ",".join("?" for _ in session_ids)
+                snapshots = [dict(row) for row in connection.execute(
+                    f"""SELECT snapshot_id, session_id, observed_at, detected_now, total_detected,
+                               boarding_count, alighting_count, occupancy_count, confidence, status
+                        FROM passenger_count_snapshots WHERE session_id IN ({placeholders})
+                        ORDER BY observed_at DESC""",
+                    session_ids,
+                ).fetchall()]
+    latest = {}
+    for snapshot in snapshots:
+        latest.setdefault(snapshot["session_id"], snapshot)
+    for session in sessions:
+        session["latest_snapshot"] = latest.get(session["session_id"])
+    return {"items": sessions}
+
+
 @app.post("/passenger-counts", status_code=201)
 def receive_passenger_count(count: PassengerCount) -> dict[str, object]:
     observed_at = count.observed_at
@@ -883,14 +1123,9 @@ def receive_passenger_count(count: PassengerCount) -> dict[str, object]:
                    confidence = excluded.confidence,
                    status = excluded.status""",
             (
-                payload["camera_id"],
-                payload["bus_route"],
-                payload["observed_at"],
-                payload["boarding_count"],
-                payload["alighting_count"],
-                payload["occupancy_count"],
-                payload["confidence"],
-                payload["status"],
+                payload["camera_id"], payload["bus_route"], payload["observed_at"],
+                payload["boarding_count"], payload["alighting_count"], payload["occupancy_count"],
+                payload["confidence"], payload["status"],
             ),
         )
         route = payload["bus_route"]
@@ -908,6 +1143,11 @@ def receive_passenger_count(count: PassengerCount) -> dict[str, object]:
                     (route, local_hour, event_count),
                 )
         connection.commit()
+    if _supabase_enabled():
+        _supabase_request(
+            "POST", "passenger_counts", payload=payload,
+            params={"on_conflict": "camera_id"}, prefer="resolution=merge-duplicates,return=minimal",
+        )
     publish_telemetry_update()
     return {"ok": True, "camera_id": payload["camera_id"]}
 
@@ -916,6 +1156,11 @@ def receive_passenger_count(count: PassengerCount) -> dict[str, object]:
 def list_passenger_counts(
     camera_id: str | None = Query(default=None, max_length=64),
 ) -> dict[str, list[dict[str, object]]]:
+    if _supabase_enabled():
+        params: dict[str, object] = {"select": "camera_id,bus_route,observed_at,boarding_count,alighting_count,occupancy_count,confidence,status", "order": "camera_id.asc"}
+        if camera_id:
+            params["camera_id"] = f"eq.{camera_id}"
+        return {"items": _supabase_request("GET", "passenger_counts", params=params) or []}
     sql = """SELECT camera_id, bus_route, observed_at, boarding_count, alighting_count,
                     occupancy_count, confidence, status
              FROM passenger_counts"""

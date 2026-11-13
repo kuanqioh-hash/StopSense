@@ -27,6 +27,22 @@ type PassengerCount = {
   confidence: number
   status: 'ok' | 'degraded' | 'offline' | 'error'
 }
+type PassengerCountSession = {
+  session_id: string
+  camera_id: string
+  bus_route?: string | null
+  started_at: string
+  ended_at?: string | null
+  status: 'active' | 'completed' | 'interrupted' | 'error'
+  latest_snapshot: {
+    observed_at: string
+    detected_now: number
+    total_detected: number
+    boarding_count: number
+    alighting_count: number
+    occupancy_count: number
+  } | null
+}
 type View = 'passenger' | 'screen' | 'operations'
 type Route = { route: string; destination: string }
 type TransitStationOption = { id: string; name: string }
@@ -450,6 +466,23 @@ function Condition({ icon, label, value, unit, tone, detail }: { icon: string; l
 }
 
 function PassengerFlow({ reports, buses, selectedBusRoute, onBusChange }: { reports: PassengerCount[]; buses: Route[]; selectedBusRoute: string; onBusChange: (route: string) => void }) {
+  const [sessions, setSessions] = useState<PassengerCountSession[]>([])
+  useEffect(() => {
+    let active = true
+    const loadSessions = async () => {
+      try {
+        const response = await fetch(`${API}/passenger-count-sessions?limit=20`)
+        if (!response.ok) return
+        const payload = await response.json() as { items?: PassengerCountSession[] }
+        if (active) setSessions(payload.items ?? [])
+      } catch {
+        if (active) setSessions([])
+      }
+    }
+    void loadSessions()
+    const interval = window.setInterval(() => void loadSessions(), 15_000)
+    return () => { active = false; window.clearInterval(interval) }
+  }, [])
   return (
     <section className="passenger-flow-panel" aria-labelledby="passenger-flow-title">
       <div className="passenger-flow-heading">
@@ -482,7 +515,27 @@ function PassengerFlow({ reports, buses, selectedBusRoute, onBusChange }: { repo
           })}
         </div>
       )}
-      <p className="flow-disclaimer">The browser counter uses COCO-SSD with local browser-side tracking; the optional Python counter uses YOLO with ByteTrack. Boarding, alighting, and occupancy are estimates from people crossing the configured bus-door line, not a count of people waiting at the stop. Occupancy starts at the configured initial count and does not change when a track merely disappears. Confidence is a detector score, not a calibrated accuracy guarantee.</p>
+      <div className="passenger-history">
+        <div className="passenger-flow-heading"><div><span className="card-kicker">SERVER-SAVED HISTORY</span><h3>Recent camera sessions</h3></div><span className="flow-separation-note">Latest count snapshots · refreshes every 15 seconds</span></div>
+        {sessions.length === 0 ? <div className="flow-empty">No saved sessions yet. Configure Supabase persistence on the backend to keep history between deployments.</div> : (
+          <div className="flow-camera-list">
+            {sessions.map((session) => (
+              <article className="flow-camera" key={session.session_id}>
+                <div className="flow-camera-title"><strong>{session.camera_id} · Route {session.bus_route ?? '—'}</strong><span className={`flow-status flow-status-${session.status}`}>{session.status}</span></div>
+                <small className="flow-updated">Started {formatTimestamp(session.started_at)}{session.ended_at ? ` · ended ${formatTimestamp(session.ended_at)}` : ''}</small>
+                {session.latest_snapshot ? <div className="flow-counts">
+                  <div><span>Detected now</span><strong>{session.latest_snapshot.detected_now}</strong></div>
+                  <div><span>Total detected</span><strong>{session.latest_snapshot.total_detected}</strong></div>
+                  <div><span>Boarding</span><strong>{session.latest_snapshot.boarding_count}</strong></div>
+                  <div><span>Alighting</span><strong>{session.latest_snapshot.alighting_count}</strong></div>
+                </div> : <small className="flow-updated">No count snapshot recorded.</small>}
+                {session.latest_snapshot && <small className="flow-updated">Last snapshot {formatTimestamp(session.latest_snapshot.observed_at)} · occupancy {session.latest_snapshot.occupancy_count}</small>}
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
+      <p className="flow-disclaimer">The browser counter uses COCO-SSD with local browser-side tracking and only counts crossings inside the manually marked doorway area and configured line; its calibration is saved on that device for each camera. The optional Python counter uses YOLO with ByteTrack. Boarding, alighting, and occupancy are estimates, not a count of people waiting at the stop. Occupancy starts at the configured initial count and does not change when a track merely disappears. Confidence is a detector score, not a calibrated accuracy guarantee.</p>
     </section>
   )
 }

@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import sqlite3
+import uuid
 import tempfile
 import unittest
 from datetime import datetime
@@ -57,6 +59,54 @@ class PassengerCountApiTests(unittest.TestCase):
             response = TestClient(main.app).get("/api/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+    def test_vercel_requires_durable_storage_for_count_sessions(self):
+        client = TestClient(main.app)
+        with patch.dict(os.environ, {"VERCEL": "1", "SUPABASE_URL": "", "SUPABASE_SERVICE_ROLE_KEY": ""}):
+            response = client.post("/passenger-count-sessions", json={
+                "camera_id": "browser-camera-01",
+                "started_at": "2026-10-21T00:00:00+00:00",
+            })
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Persistent passenger logging is not configured")
+
+    def test_passenger_count_session_keeps_timestamped_snapshots_and_closes(self):
+        session_id = str(uuid.uuid4())
+        snapshot_id = str(uuid.uuid4())
+        client = TestClient(main.app)
+        started = client.post("/passenger-count-sessions", json={
+            "session_id": session_id,
+            "camera_id": "browser-camera-01",
+            "bus_route": "T1",
+            "started_at": "2026-10-21T00:00:00+00:00",
+        })
+        self.assertEqual(started.status_code, 201)
+        snapshot = client.post(f"/passenger-count-sessions/{session_id}/snapshots", json={
+            "snapshot_id": snapshot_id,
+            "camera_id": "browser-camera-01",
+            "bus_route": "T1",
+            "observed_at": "2026-10-21T00:00:30+00:00",
+            "detected_now": 3,
+            "total_detected": 5,
+            "boarding_count": 2,
+            "alighting_count": 1,
+            "occupancy_count": 4,
+            "confidence": 0.85,
+            "status": "ok",
+        })
+        self.assertEqual(snapshot.status_code, 201)
+        ended = client.post(f"/passenger-count-sessions/{session_id}/end", json={
+            "ended_at": "2026-10-21T00:01:00+00:00",
+            "status": "completed",
+        })
+        self.assertEqual(ended.status_code, 200)
+        listing = client.get("/passenger-count-sessions?limit=20").json()["items"]
+        self.assertEqual(len(listing), 1)
+        self.assertEqual(listing[0]["status"], "completed")
+        self.assertEqual(listing[0]["latest_snapshot"]["snapshot_id"], snapshot_id)
+        self.assertEqual(listing[0]["latest_snapshot"]["total_detected"], 5)
+        latest = client.get("/passenger-counts").json()["items"]
+        self.assertEqual(latest[0]["boarding_count"], 2)
 
     def test_sse_stream_sends_initial_snapshot_and_pushes_new_telemetry(self):
         async def read_stream_events():

@@ -72,6 +72,29 @@ test('counts a crowded frame with more than 20 people crossing together', () => 
   assert.equal(new Set(result.people.map((detection) => detection.trackId)).size, 25)
 })
 
+test('counts crossings only inside the calibrated doorway region', () => {
+  const doorRegion = { left: 0.45, top: 0.4, right: 0.65, bottom: 0.75 }
+  let outside = frame([person(180)], 0, new Map(), 1, { doorRegion, requireDoorRegion: true })
+  outside = frame([person(190)], 100, outside.tracks, outside.nextTrackId, { doorRegion, requireDoorRegion: true })
+  outside = frame([person(240)], 200, outside.tracks, outside.nextTrackId, { doorRegion, requireDoorRegion: true })
+  assert.equal(outside.boarding, 0)
+  assert.equal(outside.alighting, 0)
+
+  let inside = frame([person(180, 0.9, 350)], 0, new Map(), 1, { doorRegion, requireDoorRegion: true })
+  inside = frame([person(190, 0.9, 350)], 100, inside.tracks, inside.nextTrackId, { doorRegion, requireDoorRegion: true })
+  inside = frame([person(240, 0.9, 350)], 200, inside.tracks, inside.nextTrackId, { doorRegion, requireDoorRegion: true })
+  assert.equal(inside.boarding, 1)
+})
+
+test('does not count crossings until a required doorway region is configured', () => {
+  let result = frame([person(180)], 0, new Map(), 1, { requireDoorRegion: true })
+  result = frame([person(190)], 100, result.tracks, result.nextTrackId, { requireDoorRegion: true })
+  result = frame([person(240)], 200, result.tracks, result.nextTrackId, { requireDoorRegion: true })
+
+  assert.equal(result.boarding, 0)
+  assert.equal(result.alighting, 0)
+})
+
 test('applies confidence filtering and configurable crossing direction', () => {
   const lowConfidence = frame([person(180, 0.3)], 0)
   assert.equal(lowConfidence.people.length, 0)

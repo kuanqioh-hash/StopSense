@@ -3,7 +3,7 @@ const TRACK_STALE_MS = 2000
 const TRACK_COOLDOWN_MS = 3500
 
 export function trackPeople(detections, tracks, nextTrackId, options) {
-  const { now, orientation, width, height, linePosition, confidenceThreshold, enteringDirection } = options
+  const { now, orientation, width, height, linePosition, confidenceThreshold, enteringDirection, doorRegion, requireDoorRegion = false } = options
   const axisLength = orientation === 'horizontal' ? height : width
   const line = axisLength * linePosition / 100
   const padding = Math.max(14, axisLength * 0.035)
@@ -91,13 +91,21 @@ export function trackPeople(detections, tracks, nextTrackId, options) {
         track.anchor = coordinate
       }
       if (crossingDirection) {
-        const isBoarding = (crossingDirection === 'forward') === positiveDirectionIsEntry
-        if (isBoarding) boarding += 1
-        else alighting += 1
-        confidenceSum += detection.score
-        confidenceCount += 1
-        track.lastCountAt = now
-        lastCrossingAt = now
+        const insideDoorRegion = doorRegion ? (
+          center.x / width >= doorRegion.left
+          && center.x / width <= doorRegion.right
+          && center.y / height >= doorRegion.top
+          && center.y / height <= doorRegion.bottom
+        ) : !requireDoorRegion
+        if (insideDoorRegion) {
+          const isBoarding = (crossingDirection === 'forward') === positiveDirectionIsEntry
+          if (isBoarding) boarding += 1
+          else alighting += 1
+          confidenceSum += detection.score
+          confidenceCount += 1
+          track.lastCountAt = now
+          lastCrossingAt = now
+        }
       }
     }
     updatedTracks.set(track.id, track)

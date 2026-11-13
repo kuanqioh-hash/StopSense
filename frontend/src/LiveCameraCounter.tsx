@@ -31,6 +31,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
   const previousBusRouteRef = useRef(selectedBusRoute)
   selectedBusRouteRef.current = selectedBusRoute
   const [counts, setCounts] = useState<Counts>(countsRef.current)
+  const [detectedPeople, setDetectedPeople] = useState(0)
   const [state, setState] = useState<'idle' | 'starting' | 'active' | 'error'>('idle')
   const stateRef = useRef(state)
   stateRef.current = state
@@ -78,6 +79,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
     const context = canvasRef.current?.getContext('2d')
     if (context && canvasRef.current) context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
     tracksRef.current.clear()
+    setDetectedPeople(0)
     if (state === 'active') await publish('offline')
     setState('idle')
   }
@@ -156,6 +158,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
         return
       }
       if (!keepCounts) countsRef.current = { boarding: 0, alighting: 0, occupancy: Math.max(0, Math.floor(initialOccupancy)) }
+      setDetectedPeople(0)
       setCounts(countsRef.current)
       tracksRef.current = new Map()
       nextTrackIdRef.current = 1
@@ -189,6 +192,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
             now, orientation, width, height, linePosition, confidenceThreshold, enteringDirection,
           })
           const people = result.people
+          setDetectedPeople((current) => current === people.length ? current : people.length)
           const nextCounts = {
             boarding: countsRef.current.boarding + result.boarding,
             alighting: countsRef.current.alighting + result.alighting,
@@ -304,7 +308,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
         {state !== 'active' && <div className="live-video-empty">{state === 'starting' ? 'Starting camera and COCO-SSD detector…' : 'Camera is off'}</div>}
       </div>
       <div className="live-camera-controls">
-        <div className="live-local-counts"><span>Boarding <strong>{counts.boarding}</strong></span><span>Alighting <strong>{counts.alighting}</strong></span><span>Occupancy <strong>{counts.occupancy}</strong></span></div>
+        <div className="live-local-counts"><span>Detected now <strong>{state === 'active' ? detectedPeople : '—'}</strong></span><span>Boarding <strong>{counts.boarding}</strong></span><span>Alighting <strong>{counts.alighting}</strong></span><span>Occupancy <strong>{counts.occupancy}</strong></span></div>
         <button type="button" disabled={state === 'starting'} onClick={() => void (state === 'active' ? stopCamera() : startCamera())}>{state === 'active' ? 'Stop webcam' : state === 'starting' ? 'Starting…' : 'Start webcam'}</button>
       </div>
       <small className="live-camera-message" role="status">{message || 'No video is sent to the API; only aggregate counts are published.'}</small>

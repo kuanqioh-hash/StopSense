@@ -32,6 +32,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
   selectedBusRouteRef.current = selectedBusRoute
   const [counts, setCounts] = useState<Counts>(countsRef.current)
   const [detectedPeople, setDetectedPeople] = useState(0)
+  const [totalDetectedPeople, setTotalDetectedPeople] = useState(0)
   const [state, setState] = useState<'idle' | 'starting' | 'active' | 'error'>('idle')
   const stateRef = useRef(state)
   stateRef.current = state
@@ -80,6 +81,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
     if (context && canvasRef.current) context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
     tracksRef.current.clear()
     setDetectedPeople(0)
+    setTotalDetectedPeople(0)
     if (state === 'active') await publish('offline')
     setState('idle')
   }
@@ -159,6 +161,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
       }
       if (!keepCounts) countsRef.current = { boarding: 0, alighting: 0, occupancy: Math.max(0, Math.floor(initialOccupancy)) }
       setDetectedPeople(0)
+      setTotalDetectedPeople(0)
       setCounts(countsRef.current)
       tracksRef.current = new Map()
       nextTrackIdRef.current = 1
@@ -193,6 +196,8 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
           })
           const people = result.people
           setDetectedPeople((current) => current === people.length ? current : people.length)
+          const newTracks = result.nextTrackId - nextTrackIdRef.current
+          if (newTracks > 0) setTotalDetectedPeople((current) => current + newTracks)
           const nextCounts = {
             boarding: countsRef.current.boarding + result.boarding,
             alighting: countsRef.current.alighting + result.alighting,
@@ -282,7 +287,7 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
     if (previousBusRouteRef.current !== selectedBusRoute && state === 'active') {
       countsRef.current = { boarding: 0, alighting: 0, occupancy: Math.max(0, Math.floor(initialOccupancy)) }
       tracksRef.current = new Map()
-      nextTrackIdRef.current = 1
+      setDetectedPeople(0)
       setCounts(countsRef.current)
       void publish('ok')
     }
@@ -308,10 +313,10 @@ export default function LiveCameraCounter({ apiUrl, buses, selectedBusRoute, onB
         {state !== 'active' && <div className="live-video-empty">{state === 'starting' ? 'Starting camera and COCO-SSD detector…' : 'Camera is off'}</div>}
       </div>
       <div className="live-camera-controls">
-        <div className="live-local-counts"><span>Detected now <strong>{state === 'active' ? detectedPeople : '—'}</strong></span><span>Boarding <strong>{counts.boarding}</strong></span><span>Alighting <strong>{counts.alighting}</strong></span><span>Occupancy <strong>{counts.occupancy}</strong></span></div>
+        <div className="live-local-counts"><span>Detected now <strong>{state === 'active' ? detectedPeople : '—'}</strong></span><span>Total detected <strong>{totalDetectedPeople}</strong></span><span>Boarding <strong>{counts.boarding}</strong></span><span>Alighting <strong>{counts.alighting}</strong></span><span>Occupancy <strong>{counts.occupancy}</strong></span></div>
         <button type="button" disabled={state === 'starting'} onClick={() => void (state === 'active' ? stopCamera() : startCamera())}>{state === 'active' ? 'Stop webcam' : state === 'starting' ? 'Starting…' : 'Start webcam'}</button>
       </div>
-      <small className="live-camera-message" role="status">{message || 'No video is sent to the API; only aggregate counts are published.'}</small>
+      <small className="live-camera-message" role="status">{message || 'Total detected counts new tracking IDs during this camera run; tracking is approximate and may count the same person again if their track is lost. No video is sent to the API; only aggregate counts are published.'}</small>
       {cameraDevices.length === 1 && <small className="live-camera-privacy">Only one camera is available on this device; front/back switching is not supported.</small>}
       <small className="live-camera-privacy">These doorway crossings estimate boarding/alighting and onboard occupancy, not people waiting at the stop. Allow camera access when prompted; video stays in this browser. Stop the camera when finished.</small>
     </div>

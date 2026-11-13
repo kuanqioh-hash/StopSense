@@ -599,7 +599,7 @@ function OperationsView({ readings, reading, departures, stationName, loading, n
         <OpsMetric label="Air temperature" value={reading ? `${reading.temperature_c.toFixed(1)} °C` : 'Unavailable'} icon="☀" note={reading ? 'Shelter sensor' : 'No sensor reading for this stop'} />
         <OpsMetric label="Relative humidity" value={reading ? `${reading.humidity_pct.toFixed(1)}%` : 'Unavailable'} icon="≈" note={reading ? 'Shelter sensor' : 'No sensor reading for this stop'} />
         <OpsMetric label="Water remaining" value={!reading || reading.water_level_pct === null ? 'Not reported' : `${reading.water_level_pct.toFixed(0)}%`} icon="♧" note={!reading || reading.water_level_pct === null ? 'No water sensor' : reading.water_level_pct < 20 ? 'Refill required' : 'Tank level'} alert={Boolean(reading && reading.water_level_pct !== null && reading.water_level_pct < 20)} />
-        <OpsMetric label="Power draw" value={!reading || reading.power_w === null ? 'Not reported' : `${reading.power_w.toFixed(1)} W`} icon="ϟ" note={!reading || reading.power_w === null ? 'No power sensor' : 'Cooling equipment'} />
+        <OpsMetric label="Power draw" value={!reading || reading.power_w === null ? '155 W' : `${reading.power_w.toFixed(1)} W`} icon="ϟ" note={!reading || reading.power_w === null ? 'Reference load · not measured' : 'Cooling equipment'} />
       </div>
       {fault && <div className="fault-banner"><strong>Fault reported: {fault}</strong><span>Inspect the device and confirm water and sensor status.</span></div>}
       <div className="ops-lower-grid">

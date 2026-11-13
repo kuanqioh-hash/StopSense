@@ -32,6 +32,14 @@ class ArduinoSerialBridgeTests(unittest.TestCase):
         self.assertEqual(payload["crowd_level"], "High")
         self.assertEqual(payload["crowd_source"], "sensor")
 
+    def test_bridge_log_includes_presence_status(self):
+        payload = arduino_serial_bridge.parse_reading("STOPSENSE,25.40,61.20,High", "stop-combined-1")
+        with patch("builtins.print") as mock_print, patch("arduino_serial_bridge.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__.return_value.status = 201
+            arduino_serial_bridge.post_reading("https://api.example/telemetry", payload)
+
+        self.assertIn("presence detected (High)", mock_print.call_args.args[0])
+
     def test_parses_water_level_from_combined_sensor_record(self):
         for level in (0, 42.5, 100):
             with self.subTest(level=level):

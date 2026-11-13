@@ -112,6 +112,13 @@ def post_reading(api_url: str, payload: dict[str, object]) -> None:
             sensor_summary = f"Saved {payload['temperature_c']} °C, {payload['humidity_pct']}% RH"
             if payload.get("water_level_pct") is not None:
                 sensor_summary += f", water level {payload['water_level_pct']}%"
+            crowd_level = payload.get("crowd_level")
+            if crowd_level == "High":
+                sensor_summary += ", presence detected (High)"
+            elif crowd_level == "Low":
+                sensor_summary += ", no presence detected (Low)"
+            elif crowd_level is not None:
+                sensor_summary += f", crowd status {crowd_level}"
             print(f"{sensor_summary}: HTTP {response.status}")
 
 

@@ -118,6 +118,18 @@ class Reading(BaseModel):
     fault_code: str | None = Field(default=None, max_length=64)
 
 
+class SolarReading(BaseModel):
+    device_id: str = Field(min_length=1, max_length=64)
+    timestamp: datetime
+    solar_voltage_v: float = Field(ge=0, le=1000)
+    solar_status: Literal[
+        "NO OUTPUT DETECTED",
+        "LOW OUTPUT",
+        "GENERATING ELECTRICITY",
+        "VOLTAGE NEAR RATED LEVEL",
+    ]
+
+
 class PassengerCount(BaseModel):
     camera_id: str = Field(min_length=1, max_length=64)
     bus_route: str | None = Field(default=None, min_length=1, max_length=32)
@@ -273,6 +285,19 @@ def initialize_db() -> None:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_telemetry_device_time "
             "ON telemetry(device_id, timestamp DESC)"
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS solar_telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                solar_voltage_v REAL NOT NULL,
+                solar_status TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_solar_telemetry_device_time "
+            "ON solar_telemetry(device_id, timestamp DESC)"
         )
         passenger_count_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(passenger_counts)")
@@ -881,6 +906,50 @@ def list_telemetry(
     return {"items": items}
 
 
+@app.post("/telemetry/solar", status_code=201)
+def receive_solar_telemetry(reading: SolarReading) -> dict[str, object]:
+    payload = reading.model_dump()
+    timestamp = payload["timestamp"]
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    payload["timestamp"] = timestamp.astimezone(timezone.utc).isoformat()
+
+    with closing(connect_db()) as connection:
+        cursor = connection.execute(
+            """INSERT INTO solar_telemetry (device_id, timestamp, solar_voltage_v, solar_status)
+               VALUES (?, ?, ?, ?)""",
+            (
+                payload["device_id"],
+                payload["timestamp"],
+                payload["solar_voltage_v"],
+                payload["solar_status"],
+            ),
+        )
+        connection.commit()
+        reading_id = cursor.lastrowid
+
+    publish_telemetry_update()
+    return {"ok": True, "id": reading_id, "device_id": payload["device_id"]}
+
+
+@app.get("/telemetry/solar")
+def list_solar_telemetry(
+    limit: int = Query(default=200, ge=1, le=2000),
+    device_id: str | None = Query(default=None, max_length=64),
+) -> dict[str, list[dict[str, object]]]:
+    sql = "SELECT id, device_id, timestamp, solar_voltage_v, solar_status FROM solar_telemetry"
+    params: list[object] = []
+    if device_id:
+        sql += " WHERE device_id = ?"
+        params.append(device_id)
+    sql += " ORDER BY timestamp DESC, id DESC LIMIT ?"
+    params.append(limit)
+
+    with closing(connect_db()) as connection:
+        rows = connection.execute(sql, params).fetchall()
+    return {"items": [dict(row) for row in rows]}
+
+
 @app.get("/events/telemetry")
 async def stream_telemetry(request: Request) -> StreamingResponse:
     loop = asyncio.get_running_loop()
@@ -901,6 +970,7 @@ async def stream_telemetry(request: Request) -> StreamingResponse:
 
                 snapshot = {
                     "items": list_telemetry(limit=500, device_id=None)["items"],
+                    "solar_items": list_solar_telemetry(limit=100, device_id=None)["items"],
                     "passenger_counts": list_passenger_counts(camera_id=None)["items"],
                 }
                 yield f"event: telemetry\ndata: {json.dumps(snapshot)}\n\n"

@@ -1,7 +1,12 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 import arduino_serial_bridge
+import main
 
 
 class ArduinoSerialBridgeTests(unittest.TestCase):
@@ -39,8 +44,38 @@ class ArduinoSerialBridgeTests(unittest.TestCase):
                 payload = arduino_serial_bridge.parse_reading(f"STOPSENSE,25.4,61.2,{input_level.upper()}")
                 self.assertEqual(payload["crowd_level"], api_level)
 
+    def test_parses_solar_voltage_and_maps_panel_status(self):
+        expected_statuses = {
+            "Solar Panel Voltage: 0.10 V": "NO OUTPUT DETECTED",
+            "Solar Panel Voltage: 0.50 V": "LOW OUTPUT",
+            "Solar Panel Voltage: 1.50 V": "GENERATING ELECTRICITY",
+            "Solar Panel Voltage: 3.25 V": "VOLTAGE NEAR RATED LEVEL",
+        }
+        for line, expected_status in expected_statuses.items():
+            with self.subTest(line=line):
+                payload = arduino_serial_bridge.parse_reading(line, "USJ7")
+                self.assertEqual(payload["device_id"], "USJ7")
+                self.assertEqual(payload["solar_status"], expected_status)
+                self.assertIn("solar_voltage_v", payload)
+                self.assertNotIn("temperature_c", payload)
+
     def test_ignores_non_sensor_serial_lines(self):
         self.assertIsNone(arduino_serial_bridge.parse_reading("Starting SHT31 sensor"))
+        self.assertIsNone(arduino_serial_bridge.parse_reading("STATUS: LOW OUTPUT"))
+
+    def test_rejects_invalid_solar_voltage(self):
+        for line in ("Solar Panel Voltage: -1.00 V", "Solar Panel Voltage: nan V"):
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                arduino_serial_bridge.parse_reading(line)
+
+    def test_posts_solar_readings_to_the_solar_endpoint(self):
+        payload = arduino_serial_bridge.parse_reading("Solar Panel Voltage: 3.25 V", "USJ7")
+        with patch("arduino_serial_bridge.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__.return_value.status = 201
+            arduino_serial_bridge.post_reading("https://api.example/telemetry", payload)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.example/telemetry/solar")
 
     def test_rejects_sensor_errors_malformed_lines_and_out_of_range_values(self):
         for line in (
@@ -53,6 +88,41 @@ class ArduinoSerialBridgeTests(unittest.TestCase):
         ):
             with self.subTest(line=line), self.assertRaises(ValueError):
                 arduino_serial_bridge.parse_reading(line)
+
+
+class SolarTelemetryApiTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_patch = patch.object(main, "DB_PATH", Path(self.temp_dir.name) / "solar-test.db")
+        self.db_patch.start()
+        main.initialize_db()
+        self.client = TestClient(main.app)
+
+    def tearDown(self):
+        self.db_patch.stop()
+        self.temp_dir.cleanup()
+
+    def test_stores_and_lists_solar_voltage_readings(self):
+        response = self.client.post("/telemetry/solar", json={
+            "device_id": "USJ7",
+            "timestamp": "2026-11-13T12:00:00+00:00",
+            "solar_voltage_v": 3.25,
+            "solar_status": "VOLTAGE NEAR RATED LEVEL",
+        })
+        self.assertEqual(response.status_code, 201)
+        items = self.client.get("/telemetry/solar?device_id=USJ7").json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["solar_voltage_v"], 3.25)
+        self.assertEqual(items[0]["solar_status"], "VOLTAGE NEAR RATED LEVEL")
+
+    def test_rejects_out_of_range_solar_reading(self):
+        response = self.client.post("/telemetry/solar", json={
+            "device_id": "USJ7",
+            "timestamp": "2026-11-13T12:00:00+00:00",
+            "solar_voltage_v": -1,
+            "solar_status": "LOW OUTPUT",
+        })
+        self.assertEqual(response.status_code, 422)
 
 
 if __name__ == "__main__":

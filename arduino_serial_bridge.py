@@ -2,9 +2,11 @@ import argparse
 import json
 import math
 import os
+import re
 import ssl
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 import certifi
 from urllib.error import HTTPError, URLError
@@ -13,10 +15,34 @@ from urllib.request import Request, urlopen
 DEFAULT_API_URL = os.environ.get("TELEMETRY_URL", "http://127.0.0.1:8000/telemetry")
 DEFAULT_DEVICE_ID = os.environ.get("DEVICE_ID", "arduino-sht31-01")
 TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+SOLAR_VOLTAGE_PATTERN = re.compile(r"Solar Panel Voltage:\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*V", re.IGNORECASE)
 
 
 def parse_reading(line: str, device_id: str = DEFAULT_DEVICE_ID) -> dict[str, object] | None:
-    fields = line.strip().split(",")
+    line = line.strip()
+    solar_match = SOLAR_VOLTAGE_PATTERN.fullmatch(line)
+    if solar_match:
+        solar_voltage_v = float(solar_match.group(1))
+        if not math.isfinite(solar_voltage_v) or solar_voltage_v < 0:
+            raise ValueError("Solar panel voltage must be a finite non-negative value")
+        if solar_voltage_v < 0.2:
+            solar_status = "NO OUTPUT DETECTED"
+        elif solar_voltage_v < 1.0:
+            solar_status = "LOW OUTPUT"
+        elif solar_voltage_v < 2.5:
+            solar_status = "GENERATING ELECTRICITY"
+        else:
+            solar_status = "VOLTAGE NEAR RATED LEVEL"
+        return {
+            "device_id": device_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "solar_voltage_v": solar_voltage_v,
+            "solar_status": solar_status,
+        }
+    if line.lower().startswith("solar panel voltage:"):
+        raise ValueError("Malformed solar panel voltage serial line")
+
+    fields = line.split(",")
     if not fields or fields[0] not in {"SHT31", "STOPSENSE"}:
         return None
 
@@ -62,18 +88,24 @@ def parse_reading(line: str, device_id: str = DEFAULT_DEVICE_ID) -> dict[str, ob
 
 
 def post_reading(api_url: str, payload: dict[str, object]) -> None:
+    request_url = api_url
+    if "solar_voltage_v" in payload and urlsplit(api_url).path.rstrip("/").endswith("/telemetry"):
+        request_url = api_url.rstrip("/") + "/solar"
     request = Request(
-        api_url,
+        request_url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     with urlopen(request, timeout=5, context=TLS_CONTEXT) as response:
-        print(f"Saved {payload['temperature_c']} °C, {payload['humidity_pct']}% RH: HTTP {response.status}")
+        if "solar_voltage_v" in payload:
+            print(f"Saved solar voltage {payload['solar_voltage_v']} V ({payload['solar_status']}): HTTP {response.status}")
+        else:
+            print(f"Saved {payload['temperature_c']} °C, {payload['humidity_pct']}% RH: HTTP {response.status}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Forward SHT31 readings from an Arduino Uno or ESP32 to the StopSense API")
+    parser = argparse.ArgumentParser(description="Forward solar-panel or SHT31 readings from an Arduino to the StopSense API")
     parser.add_argument("--port", default=os.environ.get("SERIAL_PORT"), help="USB serial port, e.g. /dev/cu.usbmodem1101 or COM3")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate (must match the Arduino sketch)")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="FastAPI telemetry endpoint")

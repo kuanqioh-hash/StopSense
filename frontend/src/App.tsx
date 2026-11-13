@@ -4,6 +4,13 @@ import { EhailingCompare, getOfferLinkDetails } from './MobilityExtras'
 import { AdvertisementOperations, TargetedAdvertisements } from './AdvertisementFeatures'
 
 type CrowdLevel = 'Low' | 'Moderate' | 'High' | 'Unknown'
+type SolarReading = {
+  id: number
+  device_id: string
+  timestamp: string
+  solar_voltage_v: number
+  solar_status: string
+}
 type Reading = {
   id: number
   device_id: string
@@ -134,6 +141,7 @@ function normalizeStopName(stopId: string) {
 function App() {
   const [activeAccount, setActiveAccount] = useState<SampleAccount | null>(getSavedSampleAccount)
   const [readings, setReadings] = useState<Reading[]>([])
+  const [solarReadings, setSolarReadings] = useState<SolarReading[]>([])
   const [passengerCounts, setPassengerCounts] = useState<PassengerCount[]>([])
   const [selectedStationId, setSelectedStationId] = useState('usj7')
   const [transitDepartures, setTransitDepartures] = useState<TransitDeparture[]>([])
@@ -207,10 +215,11 @@ function App() {
     const stream = new EventSource(`${API}/events/telemetry`)
     stream.addEventListener('telemetry', (event) => {
       try {
-        const snapshot = JSON.parse((event as MessageEvent<string>).data) as { items?: Reading[]; passenger_counts?: PassengerCount[] }
+        const snapshot = JSON.parse((event as MessageEvent<string>).data) as { items?: Reading[]; solar_items?: SolarReading[]; passenger_counts?: PassengerCount[] }
         if (!Array.isArray(snapshot.items)) throw new Error('Unexpected telemetry response')
         receivedSnapshot = true
         setReadings(snapshot.items.length > 0 ? snapshot.items : previewReadings)
+        setSolarReadings(Array.isArray(snapshot.solar_items) ? snapshot.solar_items : [])
         setPassengerCounts(Array.isArray(snapshot.passenger_counts) ? snapshot.passenger_counts : [])
         setUsingPreview(snapshot.items.length === 0)
         setError('')
@@ -343,7 +352,7 @@ function App() {
           <article className="comfort-card"><div className="section-heading"><div><span className="card-kicker">AT YOUR STOP</span><h2>Waiting conditions</h2></div></div><p>{loading && latest.length === 0 ? 'Connecting to the stop telemetry service…' : `No sensor readings are available for ${stationName} yet.`}</p></article>
         </section>}
         <TimetablePanel departures={transitTimetable} stationName={stationName} now={now} loading={transitLoading} />
-        {view !== 'screen' && <SolarGeneration />}
+        {view !== 'screen' && <SolarGeneration readings={solarReadings} deviceId={selectedStation.name} />}
         {view === 'operations' && <PassengerFlow reports={passengerCounts} buses={routes} selectedBusRoute={selectedBusRoute} onBusChange={setSelectedBusRoute} />}
 
         <footer className="footer"><span>CoolStop · Bus stop cooling and transit information prototype</span><span>Crowd level is waiting-area estimate, not onboard occupancy.</span></footer>
@@ -607,17 +616,21 @@ function OpsMetric({ label, value, icon, note, alert = false }: { label: string;
   return <article className={`ops-metric ${alert ? 'metric-alert' : ''}`}><span className="ops-icon">{icon}</span><span className="ops-label">{label}</span><strong>{value}</strong><small>{note}</small></article>
 }
 
-function SolarGeneration() {
+function SolarGeneration({ readings, deviceId }: { readings: SolarReading[]; deviceId: string }) {
+  const reading = readings
+    .filter((item) => normalizeStopName(item.device_id) === normalizeStopName(deviceId))
+    .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())[0]
+
   return (
     <section className="solar-panel" aria-labelledby="solar-title">
       <div className="solar-heading">
-        <div><span className="card-kicker">SOLAR ENERGY · REFERENCE VALUES</span><h2 id="solar-title">Generation &amp; energy use</h2></div>
-        <span className="simulated-tag">ILLUSTRATIVE ONLY</span>
+        <div><span className="card-kicker">SOLAR PANEL · LIVE TELEMETRY</span><h2 id="solar-title">Solar panel monitoring</h2></div>
+        <span className="simulated-tag">{reading ? 'LIVE SENSOR' : 'AWAITING DATA'}</span>
       </div>
       <div className="solar-metrics">
-        <div><span>Solar generation reading</span><strong className="solar-pending">Awaiting panel specs</strong></div>
-        <div><span>Reference total rated load</span><strong>155 <small>W</small></strong></div>
-        <div><span>Reference energy use</span><strong>1.90 <small>kWh/day</small></strong></div>
+        <div><span>Panel voltage · {deviceId}</span><strong className={reading ? '' : 'solar-pending'}>{reading ? <>{reading.solar_voltage_v.toFixed(2)} <small>V</small></> : 'No reading yet'}</strong></div>
+        <div><span>Panel status</span><strong className={reading ? '' : 'solar-pending'}>{reading?.solar_status ?? 'Not reported'}</strong></div>
+        <div><span>Last sensor update</span><strong className="solar-pending">{reading ? formatTimestamp(reading.timestamp) : '—'}</strong></div>
       </div>
       <div className="energy-breakdown" aria-label="Illustrative reference energy consumption breakdown">
         <div className="energy-breakdown-heading"><strong>Reference load and daily consumption</strong><span>Assumptions from supplied reference</span></div>
@@ -627,7 +640,7 @@ function SolarGeneration() {
         <div className="energy-row"><span><strong>Water pump</strong><small>0 W · gravity-fed</small></span><b>0 kWh/day</b></div>
       </div>
       <div className="energy-reference-summary"><span>57 kWh/month</span><span>694 kWh/year</span><span>RM 315/year at RM 0.454/kWh</span><span>526 kgCO₂e/year reference emissions</span></div>
-      <p>These are illustrative figures from the supplied reference, not site measurements. Daily use assumes fan 12 h, lights 14 h, and controls/sensors 12 h. No separate display wattage is provided—15 W is for controls + sensors, not a confirmed display rating. Solar generation, output, and panel sizing are not available until engineering specifications are provided.</p>
+      <p>Consumption figures are illustrative, not site measurements. This Arduino sensor reports panel voltage only; it does not measure current, watts, or energy generated. Current sensing and panel specifications are needed to calculate generation and size the system.</p>
     </section>
   )
 }

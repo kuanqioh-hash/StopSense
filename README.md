@@ -151,6 +151,19 @@ Replace the example port with the Uno's port shown in Arduino IDE (**Tools > Por
 
 For a hosted API, pass its full telemetry endpoint using `--api-url`, for example `https://your-api.example/telemetry`. The API must be reachable from the computer running the bridge, and the frontend must point at that same backend to display its readings. This demo API has no authentication; do not expose it publicly without adding authentication and deployment safeguards. The bridge sends temperature and humidity; water level, power, and cooler state are stored as `null` and shown as not reported, rather than fabricated.
 
+## Arduino solar-panel voltage on the dashboard
+
+The supplied `arduino/solarpanel.py/solarpanel.py.ino` sketch prints `Solar Panel Voltage: <volts> V` at 9600 baud. The Python bridge now recognizes those lines, derives the sketch's four voltage status labels, and posts each reading to `/telemetry/solar`; the live dashboard shows voltage, status, device ID, and update time. Use an Uno-compatible board for this sketch as written: it assumes a 5 V reference, 10-bit ADC, analog pin A0, and a 2:1 voltage divider. **Do not connect a panel directly to A0 if its voltage can exceed the board's analog input limit.** Use a correctly rated divider, common ground, and confirm the panel's maximum open-circuit voltage and board input limit before powering it. The bridge does not calculate watts or energy; that requires measuring current too.
+
+Upload the solar sketch, close Arduino IDE's Serial Monitor, then run the bridge with the board port and the exact device ID used for the stop in the dashboard:
+
+```bash
+python -m pip install -r requirements-arduino.txt
+python arduino_serial_bridge.py --port /dev/cu.usbmodem1101 --baud 9600 --api-url https://your-api.example/telemetry --device-id USJ7
+```
+
+For local FastAPI, replace the API URL with `http://127.0.0.1:8000/telemetry`. The frontend must use the same backend, and both backend and frontend need deployment for the hosted dashboard to receive and display the new readings. The bridge retains its 115200 baud default for the existing SHT31/StopSense sketches; pass `--baud 9600` for this solar sketch.
+
 ## Combined ESP32/Uno SHT31 + LD2410C dashboard telemetry
 
 `arduino/StopSenseESP32/StopSenseESP32.ino` combines the SHT31 temperature/humidity sensor with LD2410C presence detection and emits `STOPSENSE,<temperature C>,<humidity %>,<crowd level>` over USB serial every five seconds. On ESP32 it uses the LD2410C engineering-mode UART estimate: no target maps to `Low`, a target with fewer than six active distance gates maps to `Moderate`, and six or more active gates maps to `High`. On Uno it uses the sensor's digital `OUT` pin: `CLEAR` maps to `Low` and `PRESENT` maps to `High` (no `Moderate`). The bridge posts the crowd level with `crowd_source: sensor`. Neither method is a verified people count.

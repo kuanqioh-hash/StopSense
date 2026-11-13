@@ -125,6 +125,14 @@ class PassengerCountApiTests(unittest.TestCase):
                     cooler_on=True,
                 )
             )
+            main.receive_solar_telemetry(
+                main.SolarReading(
+                    device_id="streamed-stop",
+                    timestamp=datetime.fromisoformat("2026-10-21T00:00:00+00:00"),
+                    solar_voltage_v=3.25,
+                    solar_status="VOLTAGE NEAR RATED LEVEL",
+                )
+            )
             await asyncio.sleep(0)
             update_event = await anext(iterator)
             await iterator.aclose()
@@ -133,9 +141,10 @@ class PassengerCountApiTests(unittest.TestCase):
         initial_event, update_event = asyncio.run(read_stream_events())
         self.assertTrue(initial_event.startswith("event: telemetry"))
         initial = json.loads(initial_event.split("data: ", 1)[1].strip())
-        self.assertEqual(initial, {"items": [], "passenger_counts": []})
+        self.assertEqual(initial, {"items": [], "solar_items": [], "passenger_counts": []})
         updated = json.loads(update_event.split("data: ", 1)[1].strip())
         self.assertEqual(updated["items"][0]["device_id"], "streamed-stop")
+        self.assertEqual(updated["solar_items"][0]["solar_voltage_v"], 3.25)
         self.assertFalse(main.telemetry_subscribers)
 
     def test_existing_passenger_count_table_migrates_with_nullable_occupancy(self):

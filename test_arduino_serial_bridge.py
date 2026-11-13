@@ -32,6 +32,14 @@ class ArduinoSerialBridgeTests(unittest.TestCase):
         self.assertEqual(payload["crowd_level"], "High")
         self.assertEqual(payload["crowd_source"], "sensor")
 
+    def test_parses_water_level_from_combined_sensor_record(self):
+        for level in (0, 42.5, 100):
+            with self.subTest(level=level):
+                payload = arduino_serial_bridge.parse_reading(
+                    f"STOPSENSE,25.4,61.2,High,{level}", "stop-combined-1"
+                )
+                self.assertEqual(payload["water_level_pct"], level)
+
     def test_maps_combined_crowd_categories_case_insensitively(self):
         expected = {
             "Low": "Low",
@@ -85,6 +93,9 @@ class ArduinoSerialBridgeTests(unittest.TestCase):
             "SHT31,25.4,101",
             "STOPSENSE,25.4,61.2",
             "STOPSENSE,25.4,61.2,Busy",
+            "STOPSENSE,25.4,61.2,High,not-a-number",
+            "STOPSENSE,25.4,61.2,High,nan",
+            "STOPSENSE,25.4,61.2,High,100.1",
         ):
             with self.subTest(line=line), self.assertRaises(ValueError):
                 arduino_serial_bridge.parse_reading(line)
@@ -101,6 +112,16 @@ class SolarTelemetryApiTests(unittest.TestCase):
     def tearDown(self):
         self.db_patch.stop()
         self.temp_dir.cleanup()
+
+    def test_stores_sensor_water_level_telemetry(self):
+        payload = arduino_serial_bridge.parse_reading(
+            "STOPSENSE,25.40,61.20,High,42.5", "USJ7"
+        )
+        response = self.client.post("/telemetry", json=payload)
+
+        self.assertEqual(response.status_code, 201)
+        items = self.client.get("/telemetry?device_id=USJ7").json()["items"]
+        self.assertEqual(items[0]["water_level_pct"], 42.5)
 
     def test_stores_and_lists_solar_voltage_readings(self):
         response = self.client.post("/telemetry/solar", json={

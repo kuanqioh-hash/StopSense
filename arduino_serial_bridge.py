@@ -49,8 +49,8 @@ def parse_reading(line: str, device_id: str = DEFAULT_DEVICE_ID) -> dict[str, ob
     is_combined_reading = fields[0] == "STOPSENSE"
     if len(fields) == 3 and fields[1] == "ERROR":
         raise ValueError(f"Arduino sensor error: {fields[2]}")
-    expected_fields = 4 if is_combined_reading else 3
-    if len(fields) != expected_fields:
+    valid_field_counts = {4, 5} if is_combined_reading else {3}
+    if len(fields) not in valid_field_counts:
         sensor_name = "StopSense" if is_combined_reading else "SHT31"
         raise ValueError(f"Malformed {sensor_name} serial line")
 
@@ -66,19 +66,27 @@ def parse_reading(line: str, device_id: str = DEFAULT_DEVICE_ID) -> dict[str, ob
         raise ValueError("Humidity must be between 0 and 100 percent")
 
     crowd_level = "Unknown"
+    water_level_pct = None
     if is_combined_reading:
         crowd_levels = {"LOW": "Low", "MODERATE": "Moderate", "HIGH": "High", "UNKNOWN": "Unknown"}
         try:
             crowd_level = crowd_levels[fields[3].strip().upper()]
         except KeyError as error:
             raise ValueError("Crowd level must be Low, Moderate, High, or Unknown") from error
+        if len(fields) == 5:
+            try:
+                water_level_pct = float(fields[4])
+            except ValueError as error:
+                raise ValueError("Water level must be numeric") from error
+            if not math.isfinite(water_level_pct) or not 0 <= water_level_pct <= 100:
+                raise ValueError("Water level must be between 0 and 100 percent")
 
     return {
         "device_id": device_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "temperature_c": temperature_c,
         "humidity_pct": humidity_pct,
-        "water_level_pct": None,
+        "water_level_pct": water_level_pct,
         "power_w": None,
         "cooler_on": None,
         "crowd_level": crowd_level,
@@ -101,11 +109,14 @@ def post_reading(api_url: str, payload: dict[str, object]) -> None:
         if "solar_voltage_v" in payload:
             print(f"Saved solar voltage {payload['solar_voltage_v']} V ({payload['solar_status']}): HTTP {response.status}")
         else:
-            print(f"Saved {payload['temperature_c']} °C, {payload['humidity_pct']}% RH: HTTP {response.status}")
+            sensor_summary = f"Saved {payload['temperature_c']} °C, {payload['humidity_pct']}% RH"
+            if payload.get("water_level_pct") is not None:
+                sensor_summary += f", water level {payload['water_level_pct']}%"
+            print(f"{sensor_summary}: HTTP {response.status}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Forward solar-panel or SHT31 readings from an Arduino to the StopSense API")
+    parser = argparse.ArgumentParser(description="Forward StopSense, water-level, and solar readings from an Arduino to the API")
     parser.add_argument("--port", default=os.environ.get("SERIAL_PORT"), help="USB serial port, e.g. /dev/cu.usbmodem1101 or COM3")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate (must match the Arduino sketch)")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="FastAPI telemetry endpoint")
